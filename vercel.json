@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm --prefix frontend ci",
+  "buildCommand": "npm --prefix frontend run build -- --mode showcase",
+  "outputDirectory": "frontend/dist",
+  "headers": [
+    {
+      "source": "/presentaciones/nodaly-fepi.html",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "sandbox allow-scripts allow-downloads allow-modals"
+        }
+      ]
+    }
+  ]
+}

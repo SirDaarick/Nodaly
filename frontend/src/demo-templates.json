@@ -1,0 +1,266 @@
+[
+  {
+    "id": "assistant",
+    "name": "Asistente de documentos",
+    "description": "Responde con información de tu base de conocimiento.",
+    "nodes": [
+      {
+        "id": "message",
+        "type": "message",
+        "position": {
+          "x": 80,
+          "y": 80
+        },
+        "data": {
+          "label": "Recibir mensaje",
+          "config": {}
+        }
+      },
+      {
+        "id": "knowledge",
+        "type": "knowledge",
+        "position": {
+          "x": 300,
+          "y": 250
+        },
+        "data": {
+          "label": "Base de conocimiento",
+          "config": {
+            "text": "Nodaly es una herramienta visual de flujos de trabajo para demostraciones en clase.",
+            "document_ids": []
+          }
+        }
+      },
+      {
+        "id": "agent",
+        "type": "agent",
+        "position": {
+          "x": 520,
+          "y": 80
+        },
+        "data": {
+          "label": "Agente de IA",
+          "config": {
+            "mode": "answer",
+            "instructions": ""
+          }
+        }
+      },
+      {
+        "id": "reply",
+        "type": "reply",
+        "position": {
+          "x": 740,
+          "y": 80
+        },
+        "data": {
+          "label": "Respuesta",
+          "config": {
+            "template": ""
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "message-agent",
+        "source": "message",
+        "target": "agent"
+      },
+      {
+        "id": "agent-reply",
+        "source": "agent",
+        "target": "reply"
+      },
+      {
+        "id": "knowledge-agent",
+        "source": "knowledge",
+        "target": "agent"
+      }
+    ],
+    "message": "¿Qué es Nodaly?"
+  },
+  {
+    "id": "capture",
+    "name": "Registro de gastos",
+    "description": "Revisa un gasto antes de guardarlo.",
+    "nodes": [
+      {
+        "id": "message",
+        "type": "message",
+        "position": {
+          "x": 80,
+          "y": 80
+        },
+        "data": {
+          "label": "Recibir mensaje",
+          "config": {}
+        }
+      },
+      {
+        "id": "agent",
+        "type": "agent",
+        "position": {
+          "x": 300,
+          "y": 80
+        },
+        "data": {
+          "label": "Agente de IA",
+          "config": {
+            "mode": "extract",
+            "instructions": ""
+          }
+        }
+      },
+      {
+        "id": "register",
+        "type": "register",
+        "position": {
+          "x": 520,
+          "y": 80
+        },
+        "data": {
+          "label": "Registrar información",
+          "config": {
+            "collection": "expenses"
+          }
+        }
+      },
+      {
+        "id": "reply",
+        "type": "reply",
+        "position": {
+          "x": 740,
+          "y": 80
+        },
+        "data": {
+          "label": "Respuesta",
+          "config": {
+            "template": ""
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "message-agent",
+        "source": "message",
+        "target": "agent"
+      },
+      {
+        "id": "agent-register",
+        "source": "agent",
+        "target": "register"
+      },
+      {
+        "id": "register-reply",
+        "source": "register",
+        "target": "reply"
+      }
+    ],
+    "message": "Hoy gasté 12.50 en almuerzo (comida)."
+  },
+  {
+    "id": "report",
+    "name": "Informe de gastos",
+    "description": "Filtra y resume los gastos.",
+    "nodes": [
+      {
+        "id": "message",
+        "type": "message",
+        "position": {
+          "x": 80,
+          "y": 80
+        },
+        "data": {
+          "label": "Recibir mensaje",
+          "config": {}
+        }
+      },
+      {
+        "id": "agent",
+        "type": "agent",
+        "position": {
+          "x": 300,
+          "y": 80
+        },
+        "data": {
+          "label": "Agente de IA",
+          "config": {
+            "mode": "query",
+            "instructions": ""
+          }
+        }
+      },
+      {
+        "id": "query",
+        "type": "query",
+        "position": {
+          "x": 520,
+          "y": 80
+        },
+        "data": {
+          "label": "Consultar registros",
+          "config": {
+            "collection": "expenses",
+            "period": "all",
+            "category": ""
+          }
+        }
+      },
+      {
+        "id": "report",
+        "type": "report",
+        "position": {
+          "x": 740,
+          "y": 80
+        },
+        "data": {
+          "label": "Generar informe",
+          "config": {
+            "amount_field": "amount",
+            "group_by": "category",
+            "title": "Gastos"
+          }
+        }
+      },
+      {
+        "id": "reply",
+        "type": "reply",
+        "position": {
+          "x": 960,
+          "y": 80
+        },
+        "data": {
+          "label": "Respuesta",
+          "config": {
+            "template": ""
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "message-agent",
+        "source": "message",
+        "target": "agent"
+      },
+      {
+        "id": "agent-query",
+        "source": "agent",
+        "target": "query"
+      },
+      {
+        "id": "query-report",
+        "source": "query",
+        "target": "report"
+      },
+      {
+        "id": "report-reply",
+        "source": "report",
+        "target": "reply"
+      }
+    ],
+    "message": "Muestra todos los gastos."
+  }
+]

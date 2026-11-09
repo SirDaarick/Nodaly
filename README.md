@@ -2,6 +2,14 @@
 
 Editor visual de flujos para una demostración de diez minutos en clase. El HTML original y el PDF del proyecto se conservan sin cambios.
 
+## Demostración web en Vercel
+
+Importa el repositorio con la raíz del proyecto en el directorio principal. El archivo `vercel.json` publica el editor y la presentación como un sitio Vite estático, sin servidor, base de datos ni variables de entorno.
+
+Las tres plantillas muestran resultados de ejemplo, no ejecutan IA ni procesan archivos. Puedes editar el flujo y simular un registro; al recargar se pierde todo cambio. La aplicación local descrita abajo conserva su funcionamiento original.
+
+Para probar esta versión sin FastAPI: `npm --prefix frontend run dev -- --mode showcase`.
+
 ## Iniciar la aplicación
 
 Requisitos: Node.js 20 o superior y Python 3.11 o superior. Abre dos terminales de PowerShell desde esta carpeta.
