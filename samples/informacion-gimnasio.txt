@@ -1,0 +1,10 @@
+Gimnasio Norte: información ficticia para la demostración
+
+El horario de apertura es de lunes a viernes de 6:00 a 22:00. Los sábados el horario es de 8:00 a 14:00. Los domingos está cerrado.
+La membresía mensual cuesta 450 MXN. La inscripción cuesta 100 MXN.
+El pase de un día cuesta 80 MXN.
+La membresía incluye el área de pesas y las clases grupales.
+Se aceptan pagos en efectivo o mediante transferencia bancaria.
+Los miembros deben traer una toalla y calzado limpio para entrenar.
+Las solicitudes de cancelación se presentan en recepción antes de la siguiente renovación.
+No se ofrecen servicios de rehabilitación ni asesoría médica.
