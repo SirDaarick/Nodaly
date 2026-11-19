@@ -173,6 +173,55 @@ export function answerFromSources(
     return { reply: `Resumen de inventario:\n${lines.join('\n')}${extra}`, citations };
   }
 
+  // Handle financial / gym movement spreadsheets (Tipo: Ingreso/Egreso, Monto, Categoría, MétodoPago)
+  const hasMovements = allRows.some(({ row }) => findColumn(row, ['tipo']) && findColumn(row, ['monto', 'importe', 'total']));
+  const wantsFinance = /\b(ingreso|ingresos|egreso|egresos|gasto|gastos|corte|neto|ganancia|venta|ventas|suscripcion|suscripciones|mensualidad|mensualidades|efectivo|tarjeta|transferencia|movimiento|movimientos|resumen|total|cuanto)\b/.test(normMsg);
+  if (hasMovements && wantsFinance) {
+    let totalIn = 0;
+    let totalOut = 0;
+    const matchedMovements: typeof allRows = [];
+
+    for (const item of allRows) {
+      const tipoKey = findColumn(item.row, ['tipo']);
+      const montoKey = findColumn(item.row, ['monto', 'importe', 'total']);
+      const tipoVal = tipoKey ? normalizeText(item.row[tipoKey]) : '';
+      const montoVal = montoKey ? (parseNumeric(item.row[montoKey]) ?? 0) : 0;
+      if (tipoVal.includes('ingreso')) totalIn += montoVal;
+      else if (tipoVal.includes('egreso') || tipoVal.includes('gasto')) totalOut += montoVal;
+
+      const rowNorm = normalizeText(Object.values(item.row).join(' '));
+      if (
+        (/\b(suscripcion|suscripciones|mensualidad|mensualidades)\b/.test(normMsg) && rowNorm.includes('suscrip')) ||
+        (/\befectivo\b/.test(normMsg) && rowNorm.includes('efectivo')) ||
+        (/\btarjeta\b/.test(normMsg) && rowNorm.includes('tarjeta')) ||
+        (/\btransferencia\b/.test(normMsg) && rowNorm.includes('transferencia')) ||
+        (/\b(egreso|egresos|gasto|gastos)\b/.test(normMsg) && (tipoVal.includes('egreso') || tipoVal.includes('gasto'))) ||
+        (/\b(ingreso|ingresos)\b/.test(normMsg) && !/\b(egreso|neto|corte)\b/.test(normMsg) && tipoVal.includes('ingreso'))
+      ) {
+        matchedMovements.push(item);
+      }
+    }
+
+    allRows.slice(0, 1).forEach((item) => addCitation(item.docName, item.section));
+    if (matchedMovements.length > 0) {
+      const subTotal = matchedMovements.reduce((acc, item) => {
+        const mk = findColumn(item.row, ['monto', 'importe', 'total']);
+        return acc + (mk ? (parseNumeric(item.row[mk]) ?? 0) : 0);
+      }, 0);
+      const lines = matchedMovements.map((m) => `• ${formatRow(m.row)}`);
+      return {
+        reply: `Encontré ${matchedMovements.length} movimientos (Total: $${subTotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })} MXN):\n${lines.join('\n')}`,
+        citations,
+      };
+    }
+
+    const net = totalIn - totalOut;
+    return {
+      reply: `Resumen de movimientos del día (${allRows.length} registros):\n• Ingresos totales: $${totalIn.toLocaleString('es-MX', { minimumFractionDigits: 2 })} MXN\n• Egresos totales: $${totalOut.toLocaleString('es-MX', { minimumFractionDigits: 2 })} MXN\n• Corte neto del día: $${net.toLocaleString('es-MX', { minimumFractionDigits: 2 })} MXN`,
+      citations,
+    };
+  }
+
   // Search PDF / text lines
   const matchedLines: { score: number; docName: string; section: DocumentSection; line: string }[] = [];
   for (const source of sources) {
@@ -464,6 +513,16 @@ export function createSampleDocuments(): StoredDocument[] {
     'Horario de atención humana: Lunes a Viernes de 9:00 AM a 6:00 PM.',
   ].join('\n');
 
+  const evogymRows: DocumentRow[] = [
+    { Hora: '07:15', Concepto: 'Suscripción Mensual Plan Black', Tipo: 'Ingreso', Categoría: 'Suscripción', Cliente: 'Carlos Méndez', MétodoPago: 'Tarjeta', Monto: '$899' },
+    { Hora: '08:30', Concepto: 'Inscripción + Mensualidad Básica', Tipo: 'Ingreso', Categoría: 'Suscripción', Cliente: 'Ana López', MétodoPago: 'Transferencia', Monto: '$1150' },
+    { Hora: '10:05', Concepto: 'Pase Diario Visitante', Tipo: 'Ingreso', Categoría: 'Pase Diario', Cliente: 'Luis Torres', MétodoPago: 'Efectivo', Monto: '$120' },
+    { Hora: '11:40', Concepto: 'Proteína Whey + Agua', Tipo: 'Ingreso', Categoría: 'Tienda', Cliente: 'Mostrador', MétodoPago: 'Efectivo', Monto: '$185' },
+    { Hora: '13:20', Concepto: 'Suscripción Mensual Plan Básico', Tipo: 'Ingreso', Categoría: 'Suscripción', Cliente: 'Sofía Ramírez', MétodoPago: 'Tarjeta', Monto: '$599' },
+    { Hora: '14:10', Concepto: 'Reposición toallas y limpieza', Tipo: 'Egreso', Categoría: 'Operación', Cliente: 'Proveedor Limpieza', MétodoPago: 'Efectivo', Monto: '$420' },
+    { Hora: '16:00', Concepto: 'Mantenimiento caminadora #3', Tipo: 'Egreso', Categoría: 'Mantenimiento', Cliente: 'Técnico GymFix', MétodoPago: 'Transferencia', Monto: '$650' },
+  ];
+
   return [
     {
       id: 'sample-menu-pdf',
@@ -506,6 +565,20 @@ export function createSampleDocuments(): StoredDocument[] {
       kind: 'pdf',
       text_length: soporteText.length,
       sections: [{ label: 'Guia_Soporte_Cursos.pdf, pág. 1', page: 1, text: soporteText }],
+    },
+    {
+      id: 'sample-evogym-xlsx',
+      name: 'Movimientos_EvoGym_Dia.xlsx',
+      kind: 'excel',
+      text_length: evogymRows.map(formatRow).join('\n').length,
+      sections: [
+        {
+          label: 'Movimientos_EvoGym_Dia.xlsx (Movimientos)',
+          sheet: 'Movimientos',
+          text: evogymRows.map(formatRow).join('\n'),
+          rows: evogymRows,
+        },
+      ],
     },
   ];
 }

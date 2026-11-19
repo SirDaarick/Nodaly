@@ -50,6 +50,45 @@ def db():
             template('fepi-4-soporte-cursos','4. Soporte y Cursos en Línea (Fernando)','Clasifica solicitudes de soporte y responde dudas de la plataforma.',['message','knowledge','agent','reply'],{'knowledge':{'text':'SOPORTE PLATAFORMA DE CAPACITACIÓN\nInscripciones: Entra a Mis Cursos > Catálogo y haz clic en Inscribirme.\nConstancias: Se descargan automáticamente en PDF al completar el 100% del curso.\nRecuperar contraseña: Usa el enlace ¿Olvidaste tu contraseña? en el inicio de sesión.\nIncidencias de pago o acceso empresarial: Se escalan al equipo de soporte técnico con correo y número de matrícula.\nHorario de soporte humano: Lunes a Viernes de 9:00 AM a 6:00 PM.','document_ids':[]},'agent':{'mode':'answer','instructions':'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.'},'reply':{'template':''}},'¿Cómo descargo mi constancia si ya terminé el curso?'),
         ]
         c.executemany('INSERT OR IGNORE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_flows])
+    if c.execute("INSERT OR IGNORE INTO metadata VALUES('seeded_fepi_v2')").rowcount:
+        sandra_pages=[
+            '[Hoja: Precios]\n'
+            'Paquete: Mesa clásica (30 invitados) | Categoría: Mesas | Precio: $1800 MXN | Incluye: Mantel, 15 bases y letrero\n'
+            'Paquete: Mesa premium (60 invitados) | Categoría: Mesas | Precio: $3200 MXN | Incluye: Decoración temática y 30 bases\n'
+            'Paquete: Set de 5 exhibidores acrílicos | Categoría: Renta | Precio: $450 MXN | Incluye: Alquiler por evento (24h)\n'
+            'Paquete: Bolsa de dulces personalizada | Categoría: Extras | Precio: $35 MXN | Incluye: Etiqueta con nombre del evento\n'
+            'Paquete: Envío y montaje CDMX | Categoría: Logística | Precio: $250 MXN | Incluye: Traslado e instalación en sitio'
+        ]
+        soporte_pages=[
+            'GUÍA DE SOPORTE - PLATAFORMA DE CAPACITACIÓN\n'
+            'Inscripciones: Entra a Mis Cursos > Catálogo y haz clic en Inscribirme.\n'
+            'Constancias: Se descargan en PDF desde Mi Progreso al completar el 100% del curso.\n'
+            'Recuperar contraseña: Haz clic en ¿Olvidaste tu contraseña? en la pantalla de inicio de sesión.\n'
+            'Incidencia de pago o acceso empresarial: Clasificar como Soporte Técnico y escalar con correo y número de matrícula.\n'
+            'Horario de atención humana: Lunes a Viernes de 9:00 AM a 6:00 PM.'
+        ]
+        evogym_pages=[
+            '[Hoja: Movimientos]\n'
+            'Hora: 07:15 | Concepto: Suscripción Mensual Plan Black | Tipo: Ingreso | Categoría: Suscripción | Cliente: Carlos Méndez | MétodoPago: Tarjeta | Monto: $899\n'
+            'Hora: 08:30 | Concepto: Inscripción + Mensualidad Básica | Tipo: Ingreso | Categoría: Suscripción | Cliente: Ana López | MétodoPago: Transferencia | Monto: $1150\n'
+            'Hora: 10:05 | Concepto: Pase Diario Visitante | Tipo: Ingreso | Categoría: Pase Diario | Cliente: Luis Torres | MétodoPago: Efectivo | Monto: $120\n'
+            'Hora: 11:40 | Concepto: Proteína Whey + Agua | Tipo: Ingreso | Categoría: Tienda | Cliente: Mostrador | MétodoPago: Efectivo | Monto: $185\n'
+            'Hora: 13:20 | Concepto: Suscripción Mensual Plan Básico | Tipo: Ingreso | Categoría: Suscripción | Cliente: Sofía Ramírez | MétodoPago: Tarjeta | Monto: $599\n'
+            'Hora: 14:10 | Concepto: Reposición toallas y limpieza | Tipo: Egreso | Categoría: Operación | Cliente: Proveedor Limpieza | MétodoPago: Efectivo | Monto: $420\n'
+            'Hora: 16:00 | Concepto: Mantenimiento caminadora #3 | Tipo: Egreso | Categoría: Mantenimiento | Cliente: Técnico GymFix | MétodoPago: Transferencia | Monto: $650'
+        ]
+        c.executemany('INSERT OR REPLACE INTO documents VALUES(?,?,?)',[
+            ('sample-sandra-xlsx','Catalogo_Mesas_Sandra.xlsx',json.dumps(sandra_pages)),
+            ('sample-soporte-pdf','Guia_Soporte_Cursos.pdf',json.dumps(soporte_pages)),
+            ('sample-evogym-xlsx','Movimientos_EvoGym_Dia.xlsx',json.dumps(evogym_pages)),
+        ])
+        fepi_v2=[
+            template('fepi-1-cotizaciones','1. Cotizador Mesas de Dulces (Sandra)','Cotiza mesas de dulces pidiendo el nombre del cliente y generando copia.',['message','knowledge','agent','reply'],{'knowledge':{'text':'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.','document_ids':['sample-sandra-xlsx']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que se generó una copia para el cliente y un reporte para Sandra.'},'reply':{'template':''}},'¿Cuánto cuesta una mesa premium con exhibidores?'),
+            template('fepi-2-gastos-obra','2. Control de Obra y Gastos (Julio)','Registra gastos de materiales, obra e insumos desde WhatsApp.',['message','agent','register','reply'],{'agent':{'mode':'extract','instructions':'Extrae concepto, categoría y monto de gastos de obra o administración.'},'register':{'collection':'expenses'},'reply':{'template':''}},'Hoy gasté 850 en soldadura.'),
+            template('fepi-3-reportes-evogym','3. Movimientos e Ingresos EvoGym (Gimnasio)','Analiza el Excel diario de suscripciones, ingresos y egresos de EvoGym.',['message','knowledge','agent','reply'],{'knowledge':{'text':'Regla: Suma correctamente Ingresos, Egresos, Suscripciones y Corte Neto (Ingresos - Egresos).','document_ids':['sample-evogym-xlsx']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Eres el asistente financiero de EvoGym. Responde preguntas sobre ingresos del día, suscripciones vendidas, egresos, métodos de pago y corte neto usando el Excel de movimientos.'},'reply':{'template':''}},'¿Cuánto ingresó hoy en total?'),
+            template('fepi-4-soporte-cursos','4. Soporte y Cursos en Línea (Fernando)','Clasifica solicitudes de soporte y responde dudas de la plataforma.',['message','knowledge','agent','reply'],{'knowledge':{'text':'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.','document_ids':['sample-soporte-pdf']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.'},'reply':{'template':''}},'¿Cómo descargo mi constancia si ya terminé el curso?'),
+        ]
+        c.executemany('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_v2])
     c.commit()
     return c
 

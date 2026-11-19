@@ -117,7 +117,7 @@ function createSampleWorkflows(): SavedWorkflow[] {
                   config: {
                     mode: 'answer',
                     model: 'openai/gpt-4o-mini',
-                    instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). Da precios actualizados y calcula el total de cotizaciones claramente.',
+                    instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que se generó una copia para el cliente y un reporte para Sandra.',
                   },
                 },
               }
@@ -152,19 +152,36 @@ function createSampleWorkflows(): SavedWorkflow[] {
 
   const fepi3: SavedWorkflow = {
     id: 'fepi-3-reportes-evogym',
-    name: '3. Cortes y Reportes EvoGym (Gimnasio)',
-    nodes: clone(report.nodes).map((n) =>
+    name: '3. Movimientos e Ingresos EvoGym (Gimnasio)',
+    nodes: clone(assistant.nodes).map((n) =>
       n.type === 'message'
-        ? { ...n, data: { ...n.data, label: 'Solicitud Admin' } }
-        : n.type === 'agent'
-          ? { ...n, data: { ...n.data, label: 'Analizador de Corte' } }
-          : n.type === 'query'
-            ? { ...n, data: { ...n.data, label: 'Consultar Caja' } }
-            : n.type === 'report'
-              ? { ...n, data: { label: 'Corte EvoGym', config: { ...n.data.config, title: 'Corte administrativo EvoGym' } } }
-              : { ...n, data: { ...n.data, label: 'Enviar Corte' } },
+        ? { ...n, data: { ...n.data, label: 'Consulta Admin EvoGym' } }
+        : n.type === 'knowledge'
+          ? {
+              ...n,
+              data: {
+                label: 'Movimientos del Día (Excel)',
+                config: {
+                  text: 'Regla: Suma correctamente Ingresos, Egresos, Suscripciones y Corte Neto (Ingresos - Egresos).',
+                  document_ids: ['sample-evogym-xlsx'],
+                },
+              },
+            }
+          : n.type === 'agent'
+            ? {
+                ...n,
+                data: {
+                  label: 'Analizador Financiero IA',
+                  config: {
+                    mode: 'answer',
+                    model: 'openai/gpt-4o-mini',
+                    instructions: 'Eres el asistente financiero de EvoGym. Responde preguntas sobre ingresos del día, suscripciones vendidas, egresos, métodos de pago y corte neto usando el Excel de movimientos.',
+                  },
+                },
+              }
+            : { ...n, data: { ...n.data, label: 'Reporte EvoGym' } },
     ),
-    edges: clone(report.edges),
+    edges: clone(assistant.edges),
   };
 
   const fepi4: SavedWorkflow = {

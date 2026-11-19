@@ -2,11 +2,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReactFlow, ReactFlowProvider, useReactFlow, useNodesInitialized, Position, Background, Controls, addEdge, applyNodeChanges, applyEdgeChanges, type Node, type Edge, type NodeChange, type EdgeChange, type Connection } from '@xyflow/react';
-import { BookOpen, Check, ChevronDown, CircleHelp, Database, Eye, FileText, MessageCircle, Play, Presentation, Plus, Save, Send, Sparkles, Trash2, Upload, X, Zap } from 'lucide-react';
+import { Bell, BookOpen, Check, ChevronDown, CircleHelp, Database, Download, Eye, FileText, MessageCircle, Play, Presentation, Plus, Save, Send, Sparkles, Trash2, Upload, X, Zap } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import './style.css';
 import { createDemo } from './demo';
 import { parseDocumentFile, type StoredDocument } from './documents';
+import { exportPrintPdf, exportRowsToExcel } from './exports';
 import { defaultConfig, kinds, runPresentation, updateDimensions, displayLabel, displayStatus, displayCategory, displayField, displayOutput, type Kind, type FlowNode, type FlowEdge, type Config } from './model';
 
 type Flow = { id: string; name: string; description?: string; nodes: FlowNode[]; edges: FlowEdge[]; message?: string };
@@ -33,11 +34,22 @@ type ChatEntry = {
   time: string;
   isError?: boolean;
   run?: Run;
+  isQuote?: boolean;
+};
+type OwnerNotification = {
+  id: string;
+  kind: 'Cotización' | 'Gasto de obra';
+  flowName: string;
+  customerOrCategory: string;
+  summary: string;
+  amount: string;
+  time: string;
 };
 
 const showcase = import.meta.env.MODE === 'showcase';
 const demo = showcase ? createDemo() : null;
 const BACKEND_URL_KEY = 'nodaly.backendUrl.v1';
+const NOTIFICATIONS_KEY = 'nodaly.notifications.v1';
 
 function getInitialBackendUrl(): string {
   try {
@@ -114,8 +126,14 @@ function App() {
   const [docs, setDocs] = useState<Doc[]>([]); const [records, setRecords] = useState<RecordItem[]>([]);
   const [mode, setMode] = useState('connecting'); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const [run, setRun] = useState<Run | null>(null); const [busy, setBusy] = useState(false); const [running, setRunning] = useState(false);
-  const [tab, setTab] = useState<'chat'|'test'|'records'>('chat');
+  const [tab, setTab] = useState<'chat'|'test'|'records'|'notifications'>('chat');
   const [chatHistory, setChatHistory] = useState<ChatEntry[]>([]);
+  const [notifications, setNotifications] = useState<OwnerNotification[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(NOTIFICATIONS_KEY);
+      return raw ? (JSON.parse(raw) as OwnerNotification[]) : [];
+    } catch { return []; }
+  });
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const [backendUrl, setBackendUrl] = useState<string>(() => getInitialBackendUrl());
   const [backendInput, setBackendInput] = useState<string>(() => getInitialBackendUrl());
@@ -193,6 +211,15 @@ function App() {
     }
   }
 
+  function pushNotification(entry: Omit<OwnerNotification, 'id' | 'time'>) {
+    const nextItem: OwnerNotification = { ...entry, id: crypto.randomUUID(), time: nowTime() };
+    setNotifications(prev => {
+      const updated = [nextItem, ...prev].slice(0, 50);
+      try { window.localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(updated)); } catch { /* ignore */ }
+      return updated;
+    });
+  }
+
   async function execute(confirm = false, overrideMessage?: string) {
     const activeMessage = confirm ? (overrideMessage || lastSubmittedMessage || message) : (overrideMessage ?? message);
     if (!confirm && !activeMessage.trim()) {
@@ -228,13 +255,36 @@ function App() {
       }), backendUrl);
       setRun(result);
       if (result.error) setError(result.error);
-      if (confirm && result.status === 'completed') await refreshRecords();
+      if (confirm && result.status === 'completed') {
+        await refreshRecords();
+        if (result.preview) {
+          pushNotification({
+            kind: 'Gasto de obra',
+            flowName: name,
+            customerOrCategory: displayCategory(String(result.preview.category || 'other')),
+            summary: String(result.preview.concept || activeMessage),
+            amount: `$${String(result.preview.amount || '0.00')}`,
+          });
+        }
+      }
 
       const botText = result.status === 'error'
         ? (result.error || 'Ocurrió un error al ejecutar el flujo.')
         : result.status === 'awaiting_confirmation'
           ? 'Encontré este gasto. Revisa los datos y confírmalo para guardarlo:'
           : (result.reply || 'Flujo ejecutado.');
+
+      const isQuoteFlow = (name.toLowerCase().includes('dulces') || name.toLowerCase().includes('sandra')) && result.status === 'completed' && botText.includes('$');
+      if (isQuoteFlow) {
+        const totalMatch = botText.match(/\$[\d,]+(?:\.\d{2})?/g);
+        pushNotification({
+          kind: 'Cotización',
+          flowName: name,
+          customerOrCategory: 'Cliente WhatsApp',
+          summary: botText.slice(0, 140) + (botText.length > 140 ? '…' : ''),
+          amount: totalMatch ? totalMatch[totalMatch.length - 1] : 'Cotizado',
+        });
+      }
 
       setChatHistory(prev => [
         ...prev,
@@ -245,6 +295,7 @@ function App() {
           time: nowTime(),
           isError: result.status === 'error',
           run: result,
+          isQuote: isQuoteFlow,
         },
       ]);
     } catch (e) {
@@ -319,14 +370,16 @@ function App() {
   const activeAgentMode = String(nodes.find(n => n.type === 'agent')?.data.config?.mode ?? 'answer');
   const lowerFlowName = name.toLowerCase();
   const quickPrompts = lowerFlowName.includes('dulces') || lowerFlowName.includes('sandra')
-    ? ['¿Cuánto cuesta la mesa premium?', 'Cotiza 1 mesa clásica + exhibidores + envío', '¿Cuánto salen 40 bolsas personalizadas?']
-    : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
-      ? ['¿Cómo descargo mi constancia?', 'Olvidé mi contraseña, ¿qué hago?', 'Tengo un problema de pago empresarial']
-      : activeAgentMode === 'extract'
-        ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
-        : activeAgentMode === 'query'
-          ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
-          : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
+    ? ['Hola, quiero cotizar una mesa clásica con exhibidores', 'Soy Laura, cotízame 1 mesa clásica + exhibidores + envío', 'Soy Carlos, mesa premium + 20 bolsas personalizadas']
+    : lowerFlowName.includes('evogym') || lowerFlowName.includes('gimnasio')
+      ? ['¿Cuánto ingresó hoy en total?', '¿Cuántas suscripciones se cobraron?', '¿Cuál es el corte neto del día?']
+      : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
+        ? ['¿Cómo descargo mi constancia?', 'Olvidé mi contraseña, ¿qué hago?', 'Tengo un problema de pago empresarial']
+        : activeAgentMode === 'extract'
+          ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
+          : activeAgentMode === 'query'
+            ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
+            : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
 
   const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''} ${running ? 'is-running' : ''}`}; });
   return <div className="app-shell">
@@ -478,16 +531,17 @@ function App() {
         <div className="test-panel panel">
           <div className="test-heading">
             <div>
-              <span className="test-symbol">{tab === 'chat' ? <MessageCircle size={17}/> : tab === 'records' ? <Database size={17}/> : <Zap size={17}/>}</span>
+              <span className="test-symbol">{tab === 'chat' ? <MessageCircle size={17}/> : tab === 'records' ? <Database size={17}/> : tab === 'notifications' ? <Bell size={17}/> : <Zap size={17}/>}</span>
               <div>
-                <h2>{tab === 'chat' ? 'Simulador de chat (WhatsApp)' : tab === 'records' ? 'Registros guardados' : 'Detalle técnico del flujo'}</h2>
-                <p>{tab === 'chat' ? 'Habla con el bot conectado a tus nodos y documentos.' : 'Inspecciona el estado paso a paso o revisa los registros.'}</p>
+                <h2>{tab === 'chat' ? 'Simulador de chat (WhatsApp)' : tab === 'records' ? 'Registros guardados' : tab === 'notifications' ? 'Notificaciones y reportes del dueño' : 'Detalle técnico del flujo'}</h2>
+                <p>{tab === 'chat' ? 'Habla con el bot conectado a tus nodos y documentos.' : tab === 'notifications' ? 'Cotizaciones y gastos confirmados listos para exportar a Excel o PDF.' : 'Inspecciona el estado paso a paso o revisa los registros.'}</p>
               </div>
             </div>
             <div className="tabs">
               <button className={tab==='chat'?'active':''} onClick={()=>setTab('chat')}>Chat WhatsApp</button>
-              <button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Detalle técnico</button>
+              <button className={tab==='notifications'?'active':''} onClick={()=>setTab('notifications')}>Notificaciones{notifications.length ? ` (${notifications.length})` : ''}</button>
               <button className={tab==='records'?'active':''} onClick={()=>{setTab('records'); refreshRecords().catch(e=>setError(e.message));}}>Registros</button>
+              <button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Detalle</button>
             </div>
           </div>
 
@@ -542,6 +596,22 @@ function App() {
                         {item.sender === 'bot' && item.run && !item.isError && (
                           <div className="wa-badges">
                             {item.run.used_llm && <span className="wa-llm-badge"><Sparkles size={10}/> OpenRouter</span>}
+                            {(item.isQuote || (item.run.preview && item.run.status === 'completed')) && (
+                              <button
+                                type="button"
+                                className="wa-doc-btn"
+                                onClick={() => exportPrintPdf(
+                                  item.isQuote ? 'Cotización — Mesas de Dulces Sandra' : 'Comprobante de Gasto de Obra',
+                                  `Generado a las ${item.time} desde ${name}`,
+                                  item.run?.preview
+                                    ? Object.entries(item.run.preview).map(([k, v]) => ({ label: displayField(k), value: k === 'category' ? displayCategory(String(v)) : String(v) }))
+                                    : [{ label: 'Flujo', value: name }],
+                                  item.text,
+                                )}
+                              >
+                                <Download size={11}/> Descargar copia (PDF)
+                              </button>
+                            )}
                             {!!item.run.sources?.length && (
                               <span className="wa-sources">
                                 Fuentes: {item.run.sources.map(s => `${displayLabel(s.name)}${s.page ? ` (pág. ${s.page})` : s.sheet ? ` (${s.sheet})` : ''}`).join(' · ')}
@@ -607,8 +677,101 @@ function App() {
                 )}
               </div>
             </div>
+          ) : tab === 'notifications' ? (
+            <div className="records">
+              <div className="export-bar">
+                <button
+                  className="button secondary"
+                  disabled={!notifications.length}
+                  onClick={() => exportRowsToExcel(
+                    notifications.map(n => ({ Hora: n.time, Tipo: n.kind, Flujo: n.flowName, Detalle: n.summary, 'Cliente/Categoría': n.customerOrCategory, Monto: n.amount })),
+                    'notificaciones_nodaly.xlsx',
+                    'Notificaciones',
+                  )}
+                >
+                  <Download size={14}/> Exportar Excel (.xlsx)
+                </button>
+                <button
+                  className="button secondary"
+                  disabled={!notifications.length}
+                  onClick={() => exportPrintPdf(
+                    'Reporte de Notificaciones — Nodaly',
+                    `Total de eventos: ${notifications.length}`,
+                    [{ label: 'Fecha', value: new Date().toLocaleDateString() }],
+                    notifications.map(n => `[${n.time}] ${n.kind} (${n.amount}) — ${n.customerOrCategory}\n${n.summary}`).join('\n\n---\n\n'),
+                  )}
+                >
+                  <FileText size={14}/> Exportar PDF
+                </button>
+                {notifications.length > 0 && (
+                  <button
+                    className="button secondary"
+                    onClick={() => { setNotifications([]); try { window.localStorage.removeItem(NOTIFICATIONS_KEY); } catch { /* ignore */ } }}
+                  >
+                    Limpiar
+                  </button>
+                )}
+              </div>
+              {notifications.length ? (
+                <table>
+                  <thead><tr><th>Hora</th><th>Tipo</th><th>Detalle</th><th>Monto</th><th>Copia</th></tr></thead>
+                  <tbody>
+                    {notifications.map(n => (
+                      <tr key={n.id}>
+                        <td>{n.time}</td>
+                        <td><strong>{n.kind}</strong><br/><small>{n.customerOrCategory}</small></td>
+                        <td>{n.summary}</td>
+                        <td><b>{n.amount}</b></td>
+                        <td>
+                          <button
+                            className="wa-doc-btn"
+                            onClick={() => exportPrintPdf(
+                              `${n.kind} — ${n.flowName}`,
+                              `Registrado a las ${n.time}`,
+                              [{ label: 'Cliente / Categoría', value: n.customerOrCategory }, { label: 'Monto', value: n.amount }],
+                              n.summary,
+                            )}
+                          >
+                            <Download size={11}/> PDF
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p>Aún no hay notificaciones. Genera una cotización en Mesa de Dulces o confirma un gasto de obra para verlos aquí.</p>
+              )}
+            </div>
           ) : (
-            <div className="records">{records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}</div>
+            <div className="records">
+              <div className="export-bar">
+                <button
+                  className="button secondary"
+                  disabled={!records.length}
+                  onClick={() => exportRowsToExcel(
+                    records.map(r => ({ Fecha: r.date, Concepto: r.concept, Categoría: displayCategory(r.category), Importe: Number(r.amount) })),
+                    'registros_gastos_nodaly.xlsx',
+                    'Gastos',
+                  )}
+                >
+                  <Download size={14}/> Exportar Excel (.xlsx)
+                </button>
+                <button
+                  className="button secondary"
+                  disabled={!records.length}
+                  onClick={() => exportPrintPdf(
+                    'Registros de Gastos — Nodaly',
+                    `${records.length} registros guardados`,
+                    [{ label: 'Total', value: `$${records.reduce((s, r) => s + Number(r.amount), 0).toFixed(2)}` }],
+                    records.map(r => `• ${r.date} | ${r.concept} (${displayCategory(r.category)}) — $${r.amount}`).join('\n'),
+                  )}
+                >
+                  <FileText size={14}/> Exportar PDF
+                </button>
+              </div>
+              {records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}
+            </div>
           )}
         </div>
       </section>

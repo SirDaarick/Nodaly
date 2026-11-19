@@ -85,3 +85,8 @@
 .doc-table tr:last-child td{border-bottom:0}
 .doc-pre{margin:0;background:#f8fafc;border:1px solid #e6ebf3;border-radius:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre-wrap;color:#334155}
 @media(max-width:900px){.library,.inspector{position:static;max-height:none;min-height:0}}
+
+
+.export-bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;margin-bottom:4px}
+.wa-doc-btn{display:inline-flex;align-items:center;gap:5px;border:1px solid #cbd5e1;background:#f8fafc;color:#334155;border-radius:7px;padding:4px 9px;font-size:10px;font-weight:700}
+.wa-doc-btn:hover{background:#ede9fe;border-color:#c4b5fd;color:#5b21b6}
