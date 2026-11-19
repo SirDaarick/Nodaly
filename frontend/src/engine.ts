@@ -447,6 +447,23 @@ export function createSampleDocuments(): StoredDocument[] {
     { Producto: 'Flan napolitano', Categoría: 'Postres', Precio: '$45', Stock: '6', Estado: 'Disponible' },
   ];
 
+  const sandraRows: DocumentRow[] = [
+    { Paquete: 'Mesa clásica (30 invitados)', Categoría: 'Mesas', Precio: '$1800 MXN', Incluye: 'Mantel, 15 bases y letrero' },
+    { Paquete: 'Mesa premium (60 invitados)', Categoría: 'Mesas', Precio: '$3200 MXN', Incluye: 'Decoración temática y 30 bases' },
+    { Paquete: 'Set de 5 exhibidores acrílicos', Categoría: 'Renta', Precio: '$450 MXN', Incluye: 'Alquiler por evento (24h)' },
+    { Paquete: 'Bolsa de dulces personalizada', Categoría: 'Extras', Precio: '$35 MXN', Incluye: 'Etiqueta con nombre del evento' },
+    { Paquete: 'Envío y montaje CDMX', Categoría: 'Logística', Precio: '$250 MXN', Incluye: 'Traslado e instalación en sitio' },
+  ];
+
+  const soporteText = [
+    'GUÍA DE SOPORTE - PLATAFORMA DE CAPACITACIÓN',
+    'Inscripciones: Entra a Mis Cursos > Catálogo y haz clic en Inscribirme.',
+    'Constancias: Se descargan en PDF desde Mi Progreso al completar el 100% del curso.',
+    'Recuperar contraseña: Haz clic en ¿Olvidaste tu contraseña? en la pantalla de inicio de sesión.',
+    'Incidencia de pago o acceso empresarial: Clasificar como Soporte Técnico y escalar con correo y número de matrícula.',
+    'Horario de atención humana: Lunes a Viernes de 9:00 AM a 6:00 PM.',
+  ].join('\n');
+
   return [
     {
       id: 'sample-menu-pdf',
@@ -468,6 +485,27 @@ export function createSampleDocuments(): StoredDocument[] {
           rows: inventoryRows,
         },
       ],
+    },
+    {
+      id: 'sample-sandra-xlsx',
+      name: 'Catalogo_Mesas_Sandra.xlsx',
+      kind: 'excel',
+      text_length: sandraRows.map(formatRow).join('\n').length,
+      sections: [
+        {
+          label: 'Catalogo_Mesas_Sandra.xlsx (Precios)',
+          sheet: 'Precios',
+          text: sandraRows.map(formatRow).join('\n'),
+          rows: sandraRows,
+        },
+      ],
+    },
+    {
+      id: 'sample-soporte-pdf',
+      name: 'Guia_Soporte_Cursos.pdf',
+      kind: 'pdf',
+      text_length: soporteText.length,
+      sections: [{ label: 'Guia_Soporte_Cursos.pdf, pág. 1', page: 1, text: soporteText }],
     },
   ];
 }

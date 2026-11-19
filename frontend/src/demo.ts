@@ -96,29 +96,32 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-1-cotizaciones',
     name: '1. Cotizador Mesas de Dulces (Sandra)',
     nodes: clone(assistant.nodes).map((n) =>
-      n.type === 'knowledge'
-        ? {
-            ...n,
-            data: {
-              ...n.data,
-              config: {
-                text: 'LISTA DE PRECIOS - MESAS DE DULCES SANDRA\nMesa clásica (30 invitados): $1,800 MXN.\nMesa premium (60 invitados): $3,200 MXN.\nRenta de exhibidores acrílicos (set de 5): $450 MXN.\nBolsa de dulces personalizada: $35 MXN c/u.\nEnvío y montaje en CDMX: $250 MXN.',
-                document_ids: [],
-              },
-            },
-          }
-        : n.type === 'agent'
+      n.type === 'message'
+        ? { ...n, data: { ...n.data, label: 'Instagram / WhatsApp' } }
+        : n.type === 'knowledge'
           ? {
               ...n,
               data: {
-                ...n.data,
+                label: 'Catálogo Sandra (Excel)',
                 config: {
-                  mode: 'answer',
-                  instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). Responde con precios actualizados y arma cotizaciones claras.',
+                  text: 'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.',
+                  document_ids: ['sample-sandra-xlsx'],
                 },
               },
             }
-          : n,
+          : n.type === 'agent'
+            ? {
+                ...n,
+                data: {
+                  label: 'Cotizador IA',
+                  config: {
+                    mode: 'answer',
+                    model: 'openai/gpt-4o-mini',
+                    instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). Da precios actualizados y calcula el total de cotizaciones claramente.',
+                  },
+                },
+              }
+            : { ...n, data: { ...n.data, label: 'Enviar cotización' } },
     ),
     edges: clone(assistant.edges),
   };
@@ -126,7 +129,24 @@ function createSampleWorkflows(): SavedWorkflow[] {
   const fepi2: SavedWorkflow = {
     id: 'fepi-2-gastos-obra',
     name: '2. Control de Obra y Gastos (Julio)',
-    nodes: clone(capture.nodes),
+    nodes: clone(capture.nodes).map((n) =>
+      n.type === 'message'
+        ? { ...n, data: { ...n.data, label: 'WhatsApp Residente' } }
+        : n.type === 'agent'
+          ? {
+              ...n,
+              data: {
+                label: 'Extractor de Gastos',
+                config: {
+                  mode: 'extract',
+                  instructions: 'Extrae concepto, categoría y monto de gastos de obra, acero o administración.',
+                },
+              },
+            }
+          : n.type === 'register'
+            ? { ...n, data: { ...n.data, label: 'Bitácora de Obra' } }
+            : { ...n, data: { ...n.data, label: 'Confirmar registro' } },
+    ),
     edges: clone(capture.edges),
   };
 
@@ -134,9 +154,15 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-3-reportes-evogym',
     name: '3. Cortes y Reportes EvoGym (Gimnasio)',
     nodes: clone(report.nodes).map((n) =>
-      n.type === 'report'
-        ? { ...n, data: { ...n.data, config: { ...n.data.config, title: 'Corte administrativo EvoGym' } } }
-        : n,
+      n.type === 'message'
+        ? { ...n, data: { ...n.data, label: 'Solicitud Admin' } }
+        : n.type === 'agent'
+          ? { ...n, data: { ...n.data, label: 'Analizador de Corte' } }
+          : n.type === 'query'
+            ? { ...n, data: { ...n.data, label: 'Consultar Caja' } }
+            : n.type === 'report'
+              ? { ...n, data: { label: 'Corte EvoGym', config: { ...n.data.config, title: 'Corte administrativo EvoGym' } } }
+              : { ...n, data: { ...n.data, label: 'Enviar Corte' } },
     ),
     edges: clone(report.edges),
   };
@@ -145,29 +171,32 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-4-soporte-cursos',
     name: '4. Soporte y Cursos en Línea (Fernando)',
     nodes: clone(assistant.nodes).map((n) =>
-      n.type === 'knowledge'
-        ? {
-            ...n,
-            data: {
-              ...n.data,
-              config: {
-                text: 'SOPORTE PLATAFORMA DE CAPACITACIÓN\nInscripciones: Entra a Mis Cursos > Catálogo y haz clic en Inscribirme.\nConstancias: Se descargan automáticamente en PDF al completar el 100% del curso.\nRecuperar contraseña: Usa el enlace ¿Olvidaste tu contraseña? en el inicio de sesión.\nIncidencias de pago o acceso empresarial: Se escalan al equipo de soporte técnico con correo y número de matrícula.\nHorario de soporte humano: Lunes a Viernes de 9:00 AM a 6:00 PM.',
-                document_ids: [],
-              },
-            },
-          }
-        : n.type === 'agent'
+      n.type === 'message'
+        ? { ...n, data: { ...n.data, label: 'Ticket WhatsApp' } }
+        : n.type === 'knowledge'
           ? {
               ...n,
               data: {
-                ...n.data,
+                label: 'Guía Plataforma (PDF)',
                 config: {
-                  mode: 'answer',
-                  instructions: 'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.',
+                  text: 'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.',
+                  document_ids: ['sample-soporte-pdf'],
                 },
               },
             }
-          : n,
+          : n.type === 'agent'
+            ? {
+                ...n,
+                data: {
+                  label: 'Clasificador Soporte IA',
+                  config: {
+                    mode: 'answer',
+                    model: 'openai/gpt-4o-mini',
+                    instructions: 'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.',
+                  },
+                },
+              }
+            : { ...n, data: { ...n.data, label: 'Respuesta Soporte' } },
     ),
     edges: clone(assistant.edges),
   };

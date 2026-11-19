@@ -5,8 +5,8 @@
 
 
 .presentation-dialog {
-  width: min(1440px, calc(100% - 24px));
-  height: calc(100dvh - 24px);
+  width: min(1220px, calc(100vw - 32px));
+  height: min(760px, calc(100dvh - 32px));
   max-width: none;
   max-height: none;
   padding: 0;

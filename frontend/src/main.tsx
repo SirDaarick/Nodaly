@@ -47,9 +47,9 @@ function getInitialBackendUrl(): string {
       window.localStorage.setItem(BACKEND_URL_KEY, clean);
       return clean;
     }
-    const stored = (window.localStorage.getItem(BACKEND_URL_KEY) || '').trim().replace(/\/+$/, '');
-    if (stored) return stored;
-    return String(import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
+    const envUrl = String(import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
+    if (envUrl) return envUrl;
+    return (window.localStorage.getItem(BACKEND_URL_KEY) || '').trim().replace(/\/+$/, '');
   } catch {
     return String(import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
   }
@@ -316,11 +316,16 @@ function App() {
   }
 
   const activeAgentMode = String(nodes.find(n => n.type === 'agent')?.data.config?.mode ?? 'answer');
-  const quickPrompts = activeAgentMode === 'extract'
-    ? ['Hoy gasté 150 en insumos', 'Ayer pagué $85 de taxi', '2026-11-18 cena 240 pesos']
-    : activeAgentMode === 'query'
-      ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Gastos de insumos']
-      : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué me recomiendas con $100?'];
+  const lowerFlowName = name.toLowerCase();
+  const quickPrompts = lowerFlowName.includes('dulces') || lowerFlowName.includes('sandra')
+    ? ['¿Cuánto cuesta la mesa premium?', 'Cotiza 1 mesa clásica + exhibidores + envío', '¿Cuánto salen 40 bolsas personalizadas?']
+    : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
+      ? ['¿Cómo descargo mi constancia?', 'Olvidé mi contraseña, ¿qué hago?', 'Tengo un problema de pago empresarial']
+      : activeAgentMode === 'extract'
+        ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
+        : activeAgentMode === 'query'
+          ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
+          : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
 
   const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''} ${running ? 'is-running' : ''}`}; });
   return <div className="app-shell">
