@@ -110,7 +110,7 @@ function App() {
   const [name, setName] = useState('Flujo sin título'); const [flowId, setFlowId] = useState('');
   const canvasRef = useRef<HTMLDivElement>(null); const [fitVersion, setFitVersion] = useState(0);
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  const [selected, setSelected] = useState(''); const [message, setMessage] = useState('');
+  const [selected, setSelected] = useState(''); const [message, setMessage] = useState(''); const [lastSubmittedMessage, setLastSubmittedMessage] = useState('');
   const [docs, setDocs] = useState<Doc[]>([]); const [records, setRecords] = useState<RecordItem[]>([]);
   const [mode, setMode] = useState('connecting'); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const [run, setRun] = useState<Run | null>(null); const [busy, setBusy] = useState(false); const [running, setRunning] = useState(false);
@@ -194,7 +194,7 @@ function App() {
   }
 
   async function execute(confirm = false, overrideMessage?: string) {
-    const activeMessage = overrideMessage ?? message;
+    const activeMessage = confirm ? (overrideMessage || lastSubmittedMessage || message) : (overrideMessage ?? message);
     if (!confirm && !activeMessage.trim()) {
       setError('Escribe un mensaje para enviar al flujo.');
       return;
@@ -213,6 +213,7 @@ function App() {
       }));
 
     if (!confirm) {
+      setLastSubmittedMessage(activeMessage);
       setChatHistory(prev => [...prev, { id: crypto.randomUUID(), sender: 'user', text: activeMessage, time: nowTime() }]);
       setMessage('');
     }
@@ -525,7 +526,7 @@ function App() {
                               <div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>
                             ))}
                             {item.run.status === 'awaiting_confirmation' && run?.run_id === item.run.run_id && (
-                              <button className="button primary wa-confirm" disabled={busy} onClick={() => execute(true, '')}>Confirmar registro</button>
+                              <button className="button primary wa-confirm" disabled={busy} onClick={() => execute(true)}>Confirmar registro</button>
                             )}
                           </div>
                         )}
@@ -588,7 +589,7 @@ function App() {
                       <div className="preview">
                         <strong>{runPresentation(run.status).confirm ? 'Revisar antes de guardar' : 'Registro completado'}</strong>
                         {Object.entries(run.preview).map(([k,v])=><div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>)}
-                        {runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true, '')}>Confirmar registro</button>}
+                        {runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true)}>Confirmar registro</button>}
                       </div>
                     )}
                     {run.report && (
