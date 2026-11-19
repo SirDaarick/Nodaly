@@ -47,9 +47,11 @@ function getInitialBackendUrl(): string {
       window.localStorage.setItem(BACKEND_URL_KEY, clean);
       return clean;
     }
-    return (window.localStorage.getItem(BACKEND_URL_KEY) || '').trim().replace(/\/+$/, '');
+    const stored = (window.localStorage.getItem(BACKEND_URL_KEY) || '').trim().replace(/\/+$/, '');
+    if (stored) return stored;
+    return String(import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
   } catch {
-    return '';
+    return String(import.meta.env.VITE_BACKEND_URL || '').trim().replace(/\/+$/, '');
   }
 }
 

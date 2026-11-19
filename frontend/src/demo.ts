@@ -88,6 +88,93 @@ async function tryOpenRouter(
   }
 }
 
+function createSampleWorkflows(): SavedWorkflow[] {
+  const [assistant, capture, report] = templates as { id: string; nodes: FlowNode[]; edges: FlowEdge[] }[];
+  const clone = <T,>(v: T): T => structuredClone(v);
+
+  const fepi1: SavedWorkflow = {
+    id: 'fepi-1-cotizaciones',
+    name: '1. Cotizador Mesas de Dulces (Sandra)',
+    nodes: clone(assistant.nodes).map((n) =>
+      n.type === 'knowledge'
+        ? {
+            ...n,
+            data: {
+              ...n.data,
+              config: {
+                text: 'LISTA DE PRECIOS - MESAS DE DULCES SANDRA\nMesa clásica (30 invitados): $1,800 MXN.\nMesa premium (60 invitados): $3,200 MXN.\nRenta de exhibidores acrílicos (set de 5): $450 MXN.\nBolsa de dulces personalizada: $35 MXN c/u.\nEnvío y montaje en CDMX: $250 MXN.',
+                document_ids: [],
+              },
+            },
+          }
+        : n.type === 'agent'
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                config: {
+                  mode: 'answer',
+                  instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). Responde con precios actualizados y arma cotizaciones claras.',
+                },
+              },
+            }
+          : n,
+    ),
+    edges: clone(assistant.edges),
+  };
+
+  const fepi2: SavedWorkflow = {
+    id: 'fepi-2-gastos-obra',
+    name: '2. Control de Obra y Gastos (Julio)',
+    nodes: clone(capture.nodes),
+    edges: clone(capture.edges),
+  };
+
+  const fepi3: SavedWorkflow = {
+    id: 'fepi-3-reportes-evogym',
+    name: '3. Cortes y Reportes EvoGym (Gimnasio)',
+    nodes: clone(report.nodes).map((n) =>
+      n.type === 'report'
+        ? { ...n, data: { ...n.data, config: { ...n.data.config, title: 'Corte administrativo EvoGym' } } }
+        : n,
+    ),
+    edges: clone(report.edges),
+  };
+
+  const fepi4: SavedWorkflow = {
+    id: 'fepi-4-soporte-cursos',
+    name: '4. Soporte y Cursos en Línea (Fernando)',
+    nodes: clone(assistant.nodes).map((n) =>
+      n.type === 'knowledge'
+        ? {
+            ...n,
+            data: {
+              ...n.data,
+              config: {
+                text: 'SOPORTE PLATAFORMA DE CAPACITACIÓN\nInscripciones: Entra a Mis Cursos > Catálogo y haz clic en Inscribirme.\nConstancias: Se descargan automáticamente en PDF al completar el 100% del curso.\nRecuperar contraseña: Usa el enlace ¿Olvidaste tu contraseña? en el inicio de sesión.\nIncidencias de pago o acceso empresarial: Se escalan al equipo de soporte técnico con correo y número de matrícula.\nHorario de soporte humano: Lunes a Viernes de 9:00 AM a 6:00 PM.',
+                document_ids: [],
+              },
+            },
+          }
+        : n.type === 'agent'
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                config: {
+                  mode: 'answer',
+                  instructions: 'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.',
+                },
+              },
+            }
+          : n,
+    ),
+    edges: clone(assistant.edges),
+  };
+
+  return [fepi1, fepi2, fepi3, fepi4];
+}
+
 export function createDemo() {
   const records: ExpenseRecord[] = [
     { id: 'lunch', date: today(), concept: 'Almuerzo ficticio', category: 'food', amount: '12.50' },
@@ -101,8 +188,12 @@ export function createDemo() {
     ...savedDocs.filter((d) => !samples.some((s) => s.id === d.id)),
   ];
 
+  const defaultWorkflows = createSampleWorkflows();
   const savedWorkflows = readStorage<SavedWorkflow[]>(WORKFLOWS_KEY, []);
-  const workflows = new Map<string, SavedWorkflow>(savedWorkflows.map((w) => [w.id, w]));
+  const workflows = new Map<string, SavedWorkflow>([
+    ...defaultWorkflows.map((w) => [w.id, w] as [string, SavedWorkflow]),
+    ...savedWorkflows.map((w) => [w.id, w] as [string, SavedWorkflow]),
+  ]);
   const pendingConfirmations = new Map<string, { fingerprint: string; preview: Omit<ExpenseRecord, 'id'>; committed: boolean }>();
 
   const persistDocs = () => {

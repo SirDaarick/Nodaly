@@ -45,7 +45,7 @@ class API(unittest.TestCase):
     def test_upload_and_persistence(self):
         self.assertEqual(self.c.post('/api/documents',files={'file':('bad.exe',b'x')}).status_code,422)
         d=self.c.post('/api/documents',files={'file':('test.txt',b'The moon is blue.')}).json(); self.assertIn(d,self.c.get('/api/documents').json())
-        t=self.c.get('/api/templates').json()[0]; self.c.put('/api/workflows/test',json={'name':'Test','nodes':t['nodes'],'edges':t['edges']}); self.assertEqual(self.c.get('/api/workflows').json()[0]['name'],'Test')
+        t=self.c.get('/api/templates').json()[0]; self.c.put('/api/workflows/test',json={'name':'Test','nodes':t['nodes'],'edges':t['edges']}); self.assertTrue(any(w['name']=='Test' for w in self.c.get('/api/workflows').json()))
     def test_confirm_once(self):
         t=self.c.get('/api/templates').json()[1]; data={**t,'message':'2026-11-01 lunch food 12.50','run_id':'capture-test','confirm':False}
         before=len(self.c.get('/api/records').json()); self.assertEqual(self.c.post('/api/run',json=data).json()['status'],'awaiting_confirmation')
