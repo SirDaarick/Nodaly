@@ -2,17 +2,27 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReactFlow, ReactFlowProvider, useReactFlow, useNodesInitialized, Position, Background, Controls, addEdge, applyNodeChanges, applyEdgeChanges, type Node, type Edge, type NodeChange, type EdgeChange, type Connection } from '@xyflow/react';
-import { ArrowUpRight, BookOpen, Check, ChevronDown, CircleHelp, Database, FileText, Play, Presentation, Plus, Save, Trash2, Upload, X, Zap } from 'lucide-react';
+import { ArrowUpRight, BookOpen, Check, ChevronDown, CircleHelp, Database, FileText, MessageCircle, Play, Presentation, Plus, Save, Send, Trash2, Upload, X, Zap } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import './style.css';
 import { createDemo } from './demo';
+import { parseDocumentFile } from './documents';
 import { defaultConfig, kinds, runPresentation, updateDimensions, displayLabel, displayStatus, displayCategory, displayField, displayOutput, type Kind, type FlowNode, type FlowEdge, type Config } from './model';
 
 type Flow = { id: string; name: string; description?: string; nodes: FlowNode[]; edges: FlowEdge[]; message?: string };
 type Doc = { id: string; name: string; text_length: number };
 type Step = { node_id: string; status: string; output: unknown };
-type Run = { run_id: string; status: string; mode: string; steps: Step[]; reply: string; error?: string; preview?: Record<string, unknown>; sources?: {name: string; page?: number}[]; report?: {total: string; count: number; groups: {category: string; total: string; count: number}[]} };
+type Run = { run_id: string; status: string; mode: string; steps: Step[]; reply: string; error?: string; preview?: Record<string, unknown>; sources?: {name: string; page?: number; sheet?: string}[]; report?: {title?: string; total: string; count: number; groups: {category: string; total: string; count: number}[]} };
 type RecordItem = { id: string; date: string; concept: string; category: string; amount: string };
+type ChatEntry = {
+  id: string;
+  sender: 'user' | 'bot';
+  text: string;
+  time: string;
+  isError?: boolean;
+  run?: Run;
+};
+
 const showcase = import.meta.env.MODE === 'showcase';
 const demo = showcase ? createDemo() : null;
 
@@ -25,6 +35,8 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 const json = (data: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
 const ariaLabels = {
   'node.a11yDescription.default': 'Pulsa Intro o Espacio para seleccionar un nodo. Usa las flechas para moverlo.',
   'node.a11yDescription.keyboardDisabled': 'Pulsa Intro o Espacio para seleccionar un nodo.',
@@ -55,10 +67,13 @@ function App() {
   const [nodes, setNodes] = useState<FlowNode[]>([]); const [measurements, setMeasurements] = useState<Record<string, {width:number; height:number}>>({}); const [edges, setEdges] = useState<FlowEdge[]>([]);
   const [name, setName] = useState('Flujo sin título'); const [flowId, setFlowId] = useState('');
   const canvasRef = useRef<HTMLDivElement>(null); const [fitVersion, setFitVersion] = useState(0);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState(''); const [message, setMessage] = useState('');
   const [docs, setDocs] = useState<Doc[]>([]); const [records, setRecords] = useState<RecordItem[]>([]);
   const [mode, setMode] = useState('connecting'); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
-  const [run, setRun] = useState<Run | null>(null); const [busy, setBusy] = useState(false); const [running, setRunning] = useState(false); const [tab, setTab] = useState<'test'|'records'>('test');
+  const [run, setRun] = useState<Run | null>(null); const [busy, setBusy] = useState(false); const [running, setRunning] = useState(false);
+  const [tab, setTab] = useState<'chat'|'test'|'records'>('chat');
+  const [chatHistory, setChatHistory] = useState<ChatEntry[]>([]);
   const presentationDialog = useRef<HTMLDialogElement>(null);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const current = nodes.find(n => n.id === selected);
@@ -66,12 +81,31 @@ function App() {
   const refreshRecords = () => api<RecordItem[]>('/records').then(setRecords);
   const refreshFlows = () => api<Flow[]>('/workflows').then(setFlows);
   useEffect(() => {
-    Promise.all([api<{mode:string}>('/health'), api<Flow[]>('/templates'), api<Flow[]>('/workflows'), api<Doc[]>('/documents')])
-      .then(([health, ts, fs, ds]) => { setMode(health.mode); setTemplates(ts); setFlows(fs); setDocs(ds); if (ts[0]) load(ts[0], false); })
+    Promise.all([api<{mode:string}>('/health'), api<Flow[]>('/templates'), api<Flow[]>('/workflows'), api<Doc[]>('/documents'), api<RecordItem[]>('/records')])
+      .then(([health, ts, fs, ds, rs]) => { setMode(health.mode); setTemplates(ts); setFlows(fs); setDocs(ds); setRecords(rs); if (ts[0]) load(ts[0], false); })
       .catch(e => { setMode('offline'); setError(e.message); });
   }, []);
   useEffect(() => { document.querySelectorAll('.library, .inspector').forEach(el => { if (busy) el.setAttribute('inert', ''); else el.removeAttribute('inert'); }); }, [busy]);
-  function load(flow: Flow, saved: boolean) { setFitVersion(v => v + 1); setMeasurements({}); setNodes(flow.nodes); setEdges(flow.edges); setName(flow.name); setFlowId(saved ? flow.id : ''); setSelected(flow.nodes[0]?.id || ''); setMessage(flow.message || ''); setRun(null); setNotice(''); setError(''); }
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [chatHistory, tab]);
+
+  function load(flow: Flow, saved: boolean) {
+    setFitVersion(v => v + 1);
+    setMeasurements({});
+    setNodes(flow.nodes);
+    setEdges(flow.edges);
+    setName(flow.name);
+    setFlowId(saved ? flow.id : '');
+    setSelected(flow.nodes[0]?.id || '');
+    setMessage(flow.message || '');
+    setRun(null);
+    setChatHistory([]);
+    setNotice('');
+    setError('');
+  }
   function addNode(type: Kind) { const id = `${type}-${crypto.randomUUID()}`; const item = meta(type); setNodes(ns => [...ns, {id, type, position: {x: 100 + (ns.length % 4)*210, y: 100 + Math.floor(ns.length / 4)*150}, data: {label:item.label, config:defaultConfig(type)}}]); setSelected(id); setRun(null); }
   function updateConfig(key: string, value: unknown) { setNodes(ns => ns.map(n => n.id === selected ? {...n, data: {...n.data, config: {...n.data.config, [key]: value}}} : n)); setRun(null); }
   const onNodesChange = useCallback((changes: NodeChange[]) => {
@@ -88,12 +122,106 @@ function App() {
   const onEdgesChange = useCallback((changes: EdgeChange[]) => { setEdges(es => applyEdgeChanges(changes, es as Edge[]) as FlowEdge[]); if (changes.some(c => c.type === 'remove')) setRun(null); }, []);
   const onConnect = useCallback((connection: Connection) => { setEdges(es => addEdge(connection, es as Edge[]) as FlowEdge[]); setRun(null); }, []);
   async function save() { setBusy(true); setError(''); try { const id = flowId || crypto.randomUUID(); await api<Flow>(`/workflows/${id}`, {...json({name, nodes, edges}), method:'PUT'}); setFlowId(id); await refreshFlows(); setNotice('Flujo guardado.'); } catch(e) { setError((e as Error).message); } finally {setBusy(false);} }
-  async function execute(confirm = false) { setRunning(true); setBusy(true); setError(''); setNotice(''); try { const result = await api<Run>('/run', json({nodes, edges, message, run_id: confirm && run ? run.run_id : crypto.randomUUID(), confirm})); setRun(result); if (result.error) setError(result.error); if (confirm && result.status === 'completed') await refreshRecords(); } catch(e) { setError((e as Error).message); } finally {setRunning(false); setBusy(false);} }
-  async function upload(file?: File) { if (!file) return; if (file.size > 5 * 1024 * 1024 || !/\.(pdf|txt)$/i.test(file.name)) { setError('Selecciona un archivo PDF o TXT de hasta 5 MB.'); return; } setBusy(true); setError(''); try { const body = new FormData(); body.append('file', file); await api<Doc>('/documents', {method:'POST', body}); await refreshDocs(); setNotice('Documento cargado. Selecciónalo abajo para añadirlo a esta base de conocimiento.'); } catch(e) {setError((e as Error).message);} finally {setBusy(false);} }
-  async function removeDoc(id: string) { setBusy(true); setError(''); try { await api(`/documents/${id}`, {method:'DELETE'}); setNodes(ns => ns.map(n => n.type === 'knowledge' ? {...n, data: {...n.data, config: {...n.data.config, document_ids: ((n.data.config.document_ids as string[]) || []).filter(x => x !== id)}}} : n)); await refreshDocs(); setRun(null); } catch(e) {setError((e as Error).message);} finally {setBusy(false);} }
+
+  async function execute(confirm = false, overrideMessage?: string) {
+    const activeMessage = overrideMessage ?? message;
+    if (!confirm && !activeMessage.trim()) {
+      setError('Escribe un mensaje para enviar al flujo.');
+      return;
+    }
+    setRunning(true);
+    setBusy(true);
+    setError('');
+    setNotice('');
+    if (!confirm) {
+      setChatHistory(prev => [...prev, { id: crypto.randomUUID(), sender: 'user', text: activeMessage, time: nowTime() }]);
+      if (overrideMessage !== undefined) setMessage('');
+      else setMessage('');
+    }
+    try {
+      const result = await api<Run>('/run', json({ nodes, edges, message: activeMessage, run_id: confirm && run ? run.run_id : crypto.randomUUID(), confirm }));
+      setRun(result);
+      if (result.error) setError(result.error);
+      if (confirm && result.status === 'completed') await refreshRecords();
+
+      const botText = result.status === 'error'
+        ? (result.error || 'Ocurrió un error al ejecutar el flujo.')
+        : result.status === 'awaiting_confirmation'
+          ? 'Encontré este gasto. Revisa los datos y confírmalo para guardarlo:'
+          : (result.reply || 'Flujo ejecutado.');
+
+      setChatHistory(prev => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          sender: 'bot',
+          text: botText,
+          time: nowTime(),
+          isError: result.status === 'error',
+          run: result,
+        },
+      ]);
+    } catch (e) {
+      const errMsg = (e as Error).message;
+      setError(errMsg);
+      setChatHistory(prev => [...prev, { id: crypto.randomUUID(), sender: 'bot', text: errMsg, time: nowTime(), isError: true }]);
+    } finally {
+      setRunning(false);
+      setBusy(false);
+    }
+  }
+
+  async function upload(file?: File) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024 || !/\.(pdf|txt|xlsx|xls|csv)$/i.test(file.name)) {
+      setError('Selecciona un archivo PDF, Excel (.xlsx, .xls), CSV o TXT de hasta 5 MB.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      if (demo) {
+        const parsed = await parseDocumentFile(file);
+        await api<Doc>('/documents', json(parsed));
+      } else {
+        const body = new FormData();
+        body.append('file', file);
+        await api<Doc>('/documents', { method: 'POST', body });
+      }
+      await refreshDocs();
+      setNotice('Documento cargado. Selecciónalo abajo para conectarlo a esta base de conocimiento.');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeDoc(id: string) {
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/documents/${id}`, { method: 'DELETE' });
+      setNodes(ns => ns.map(n => n.type === 'knowledge' ? { ...n, data: { ...n.data, config: { ...n.data.config, document_ids: ((n.data.config.document_ids as string[]) || []).filter(x => x !== id) } } } : n));
+      await refreshDocs();
+      setRun(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const activeAgentMode = String(nodes.find(n => n.type === 'agent')?.data.config?.mode ?? 'answer');
+  const quickPrompts = activeAgentMode === 'extract'
+    ? ['Hoy gasté 150 en insumos', 'Ayer pagué $85 de taxi', '2026-11-18 cena 240 pesos']
+    : activeAgentMode === 'query'
+      ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Gastos de insumos']
+      : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
+
   const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''}`}; });
   return <div className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><span>✦</span></span><span>Nodaly<small>ESTUDIO DE FLUJOS</small></span></div><div className="top-divider"/><div className="top-title"><span>Espacio de trabajo</span><strong>Editor visual de flujos</strong></div><div className="top-actions"><button className="button secondary" onClick={() => { presentationDialog.current?.showModal(); setPresentationOpen(true); }}><Presentation size={16} aria-hidden="true"/> Presentación</button><span className={`mode ${mode}`}><i/> {mode === 'showcase' ? 'Demo sin guardado' : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span><button className="icon-button help" title="Cómo usar" onClick={() => setNotice('Elige una plantilla, selecciona los nodos para configurarlos y ejecuta un mensaje de prueba. Conecta los nodos arrastrando entre sus puntos de conexión.')}><CircleHelp size={19}/></button></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark"><span>✦</span></span><span>Nodaly<small>ESTUDIO DE FLUJOS</small></span></div><div className="top-divider"/><div className="top-title"><span>Espacio de trabajo</span><strong>Editor visual de flujos</strong></div><div className="top-actions"><button className="button secondary" onClick={() => { presentationDialog.current?.showModal(); setPresentationOpen(true); }}><Presentation size={16} aria-hidden="true"/> Presentación</button><span className={`mode ${mode}`}><i/> {mode === 'showcase' ? 'En navegador (Vercel)' : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span><button className="icon-button help" title="Cómo usar" onClick={() => setNotice('Elige una plantilla, selecciona los nodos para configurarlos (puedes subir tu propio PDF o Excel) y conversa en el chat simulado tipo WhatsApp.')}><CircleHelp size={19}/></button></div></header>
     <dialog ref={presentationDialog} className="presentation-dialog" aria-labelledby="presentation-title" onClose={() => setPresentationOpen(false)}>
       <div className="presentation-content">
         <header className="presentation-toolbar">
@@ -104,21 +232,160 @@ function App() {
       </div>
     </dialog>
     <main className="workspace"><aside className={`library panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}><div className="sidebar-heading"><div><span className="section-kicker">CREA TU FLUJO</span><h2>Biblioteca de nodos</h2></div><span className="count">7</span></div><p className="muted">Todo lo que necesitas para crear un asistente útil.</p><div className="library-list">{kinds.map(k => <button key={k.type} className="library-item" onClick={() => addNode(k.type)}><span className={`node-icon ${k.color}`}>{k.icon}</span><span><strong>{k.label}</strong><small>{k.description}</small></span><Plus className="add-icon" size={17}/></button>)}</div><div className="library-tip"><span>✦</span><div><strong>Personaliza tu flujo</strong><p>Añade nodos y conéctalos. Selecciona un nodo para editar su configuración.</p></div></div></aside>
-    <section className="center"><div className="canvas-toolbar"><div><div className="breadcrumb">Mi espacio de trabajo <span>/</span> <strong>Editor de flujos</strong></div><input aria-label="Nombre del flujo" className="workflow-name" disabled={busy} value={displayLabel(name)} onChange={e=>setName(e.target.value)} /></div><div className="toolbar-actions"><label className="select-wrap"><span className="sr-only">Elegir una plantilla</span><select disabled={busy} value="" onChange={e=>{const f=templates.find(t=>t.id===e.target.value); if(f) load(f,false);}}><option value="">Plantillas</option>{templates.map(t=><option key={t.id} value={t.id}>{displayLabel(t.name)}</option>)}</select><ChevronDown size={15}/></label>{!showcase && <><label className="select-wrap"><span className="sr-only">Abrir flujo guardado</span><select disabled={busy} value="" onChange={e=>{const f=flows.find(t=>t.id===e.target.value); if(f) load(f,true);}}><option value="">Flujos guardados</option>{flows.map(f=><option key={f.id} value={f.id}>{displayLabel(f.name)}</option>)}</select><ChevronDown size={15}/></label><button className="button secondary" onClick={save} disabled={busy || !nodes.length}><Save size={16}/> Guardar</button></>}<button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length}><Play size={15} fill="currentColor"/> {running ? 'Ejecutando…' : 'Ejecutar flujo'}</button></div></div>
+    <section className="center"><div className="canvas-toolbar"><div><div className="breadcrumb">Mi espacio de trabajo <span>/</span> <strong>Editor de flujos</strong></div><input aria-label="Nombre del flujo" className="workflow-name" disabled={busy} value={displayLabel(name)} onChange={e=>setName(e.target.value)} /></div><div className="toolbar-actions"><label className="select-wrap"><span className="sr-only">Elegir una plantilla</span><select disabled={busy} value="" onChange={e=>{const f=templates.find(t=>t.id===e.target.value); if(f) load(f,false);}}><option value="">Plantillas</option>{templates.map(t=><option key={t.id} value={t.id}>{displayLabel(t.name)}</option>)}</select><ChevronDown size={15}/></label>{!showcase && <><label className="select-wrap"><span className="sr-only">Abrir flujo guardado</span><select disabled={busy} value="" onChange={e=>{const f=flows.find(t=>t.id===e.target.value); if(f) load(f,true);}}><option value="">Flujos guardados</option>{flows.map(f=><option key={f.id} value={f.id}>{displayLabel(f.name)}</option>)}</select><ChevronDown size={15}/></label><button className="button secondary" onClick={save} disabled={busy || !nodes.length}><Save size={16}/> Guardar</button></>}<button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={15} fill="currentColor"/> {running ? 'Ejecutando…' : 'Probar mensaje'}</button></div></div>
       <div className="canvas-wrap" ref={canvasRef}><div className="canvas-caption"><span className="live-dot"/> Tu lienzo <span className="caption-detail">· Arrastra para mover y conecta para crear</span></div><ReactFlow ariaLabelConfig={ariaLabels} nodes={displayed} edges={edges.map(edge => ({...edge, ariaLabel: `Conexión de ${displayLabel(nodes.find(n => n.id === edge.source)?.data.label || edge.source)} a ${displayLabel(nodes.find(n => n.id === edge.target)?.data.label || edge.target)}`})) as Edge[]} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_,n)=>setSelected(n.id)} onPaneClick={()=>setSelected('')} nodesDraggable={!busy} nodesConnectable={!busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace','Delete']} minZoom={0.2}><FitCanvas version={fitVersion} container={canvasRef}/><Background gap={24} size={1.3} color="#cbd4e2"/><Controls showInteractive={false}/></ReactFlow><div className="canvas-footer"><span><span className="live-dot"/> {nodes.length} nodos</span><span>{edges.length} conexiones</span></div></div>
-      <div className="test-panel panel"><div className="test-heading"><div><span className="test-symbol"><Zap size={17}/></span><div><h2>Prueba tu flujo</h2><p>Escribe un mensaje y observa qué sucede en cada paso.</p></div></div><div className="tabs"><button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Prueba</button><button className={tab==='records'?'active':''} onClick={()=>{setTab('records'); refreshRecords().catch(e=>setError(e.message));}}>Registros</button></div></div>{tab==='test' ? <div className="test-content"><div className="message-input"><label htmlFor="message">Tu mensaje</label><textarea id="message" disabled={busy} value={message} onChange={e=>{setMessage(e.target.value); setRun(null);}} placeholder="Escribe un mensaje para probar tu flujo…" rows={2}/><button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length}><Play size={14} fill="currentColor"/> {running ? 'Ejecutando…' : 'Ejecutar prueba'}</button></div><div className="result">{run ? <><div className="result-title"><span className={`result-badge ${runPresentation(run.status).tone}`}>{run.status === 'completed' ? <Check size={14}/> : run.status === 'error' ? <X size={14}/> : '!'}</span><strong>{displayStatus(run.status)}</strong><span>{run.mode === 'showcase' ? 'Resultado de ejemplo' : run.mode === 'demo' ? 'Demostración local' : 'IA en vivo'}</span></div>{run.reply && <p>{run.reply}</p>}{run.preview && run.status !== 'error' && <div className="preview"><strong>{runPresentation(run.status).confirm ? (showcase ? 'Revisar registro de ejemplo' : 'Revisar antes de guardar') : 'Registro completado'}</strong>{Object.entries(run.preview).map(([k,v])=><div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>)}{runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true)}>Confirmar registro</button>}</div>}{run.report && <div className="preview"><strong>{displayLabel(String(nodes.find(n=>n.type==='report')?.data.config.title || 'Informe'))} · {run.report.count} registros</strong><div><span>Total</span><b>{run.report.total}</b></div>{run.report.groups.map(g=><div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>{g.total}</b></div>)}</div>}{!!run.sources?.length && <p className="sources">Fuentes: {run.sources.map(s=>`${displayLabel(s.name)}${s.page ? `, página ${s.page}` : ''}`).join(' · ')}</p>}{run.steps.map(s=><details key={s.node_id}><summary>{displayLabel(nodes.find(n=>n.id===s.node_id)?.data.label || s.node_id)} · {displayStatus(s.status)}</summary><pre>{typeof s.output === 'string' ? s.output : JSON.stringify(displayOutput(s.output),null,2)}</pre></details>)}</> : <div className="empty-result"><span>✦</span><div><strong>Todo listo</strong><p>Ejecuta una prueba para ver el resultado aquí.</p></div></div>}</div></div> : <div className="records">{records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}</div>}</div>
+      <div className="test-panel panel">
+        <div className="test-heading">
+          <div>
+            <span className="test-symbol">{tab === 'chat' ? <MessageCircle size={17}/> : tab === 'records' ? <Database size={17}/> : <Zap size={17}/>}</span>
+            <div>
+              <h2>{tab === 'chat' ? 'Simulador de chat (WhatsApp)' : tab === 'records' ? 'Registros guardados' : 'Detalle técnico del flujo'}</h2>
+              <p>{tab === 'chat' ? 'Habla con el bot conectado a tus nodos y documentos.' : 'Inspecciona el estado paso a paso o revisa los registros.'}</p>
+            </div>
+          </div>
+          <div className="tabs">
+            <button className={tab==='chat'?'active':''} onClick={()=>setTab('chat')}>Chat WhatsApp</button>
+            <button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Detalle técnico</button>
+            <button className={tab==='records'?'active':''} onClick={()=>{setTab('records'); refreshRecords().catch(e=>setError(e.message));}}>Registros</button>
+          </div>
+        </div>
+
+        {tab === 'chat' ? (
+          <div className="wa-shell">
+            <div className="wa-topbar">
+              <div className="wa-avatar">✦</div>
+              <div className="wa-peer">
+                <strong>{displayLabel(name)} · Bot</strong>
+                <small>{running ? 'escribiendo…' : 'en línea · conectado al flujo'}</small>
+              </div>
+              <div className="wa-chips">
+                {quickPrompts.map(q => (
+                  <button key={q} className="wa-chip" disabled={busy || !nodes.length} onClick={() => execute(false, q)}>{q}</button>
+                ))}
+              </div>
+              {chatHistory.length > 0 && (
+                <button className="wa-clear" onClick={() => setChatHistory([])} title="Limpiar chat">Limpiar</button>
+              )}
+            </div>
+
+            <div className="wa-messages" ref={chatScrollRef}>
+              {!chatHistory.length ? (
+                <div className="wa-empty">
+                  <MessageCircle size={22}/>
+                  <p>Envía un mensaje o haz clic en una sugerencia para hablar con el bot usando tu flujo actual.</p>
+                </div>
+              ) : (
+                chatHistory.map(item => (
+                  <div key={item.id} className={`wa-row ${item.sender}`}>
+                    <div className={`wa-bubble ${item.sender} ${item.isError ? 'is-error' : ''}`}>
+                      <p>{item.text}</p>
+                      {item.run?.preview && item.run.status !== 'error' && (
+                        <div className="wa-card">
+                          {Object.entries(item.run.preview).map(([k, v]) => (
+                            <div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>
+                          ))}
+                          {item.run.status === 'awaiting_confirmation' && run?.run_id === item.run.run_id && (
+                            <button className="button primary wa-confirm" disabled={busy} onClick={() => execute(true, '')}>Confirmar registro</button>
+                          )}
+                        </div>
+                      )}
+                      {item.run?.report && (
+                        <div className="wa-card">
+                          <div><span>Registros</span><b>{item.run.report.count}</b></div>
+                          <div><span>Total</span><b>${item.run.report.total}</b></div>
+                          {item.run.report.groups.map(g => (
+                            <div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>${g.total}</b></div>
+                          ))}
+                        </div>
+                      )}
+                      {!!item.run?.sources?.length && (
+                        <div className="wa-sources">
+                          Fuentes: {item.run.sources.map(s => `${displayLabel(s.name)}${s.page ? ` (pág. ${s.page})` : s.sheet ? ` (${s.sheet})` : ''}`).join(' · ')}
+                        </div>
+                      )}
+                      <span className="wa-meta">{item.time}{item.sender === 'user' ? ' ✓✓' : ''}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <form className="wa-composer" onSubmit={e => { e.preventDefault(); execute(); }}>
+              <input
+                aria-label="Mensaje de chat"
+                disabled={busy || !nodes.length}
+                value={message}
+                onChange={e => setMessage(e.target.value)}
+                placeholder="Escribe un mensaje como en WhatsApp…"
+              />
+              <button type="submit" className="button primary" disabled={busy || !nodes.length || !message.trim()}>
+                <Send size={14}/> Enviar
+              </button>
+            </form>
+          </div>
+        ) : tab === 'test' ? (
+          <div className="test-content">
+            <div className="message-input">
+              <label htmlFor="message">Tu mensaje</label>
+              <textarea id="message" disabled={busy} value={message} onChange={e=>{setMessage(e.target.value); setRun(null);}} placeholder="Escribe un mensaje para probar tu flujo…" rows={2}/>
+              <button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={14} fill="currentColor"/> {running ? 'Ejecutando…' : 'Ejecutar prueba'}</button>
+            </div>
+            <div className="result">
+              {run ? (
+                <>
+                  <div className="result-title">
+                    <span className={`result-badge ${runPresentation(run.status).tone}`}>{run.status === 'completed' ? <Check size={14}/> : run.status === 'error' ? <X size={14}/> : '!'}</span>
+                    <strong>{displayStatus(run.status)}</strong>
+                    <span>{run.mode === 'showcase' ? 'En navegador' : run.mode === 'demo' ? 'Demostración local' : 'IA en vivo'}</span>
+                  </div>
+                  {run.reply && <p>{run.reply}</p>}
+                  {run.preview && run.status !== 'error' && (
+                    <div className="preview">
+                      <strong>{runPresentation(run.status).confirm ? 'Revisar antes de guardar' : 'Registro completado'}</strong>
+                      {Object.entries(run.preview).map(([k,v])=><div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>)}
+                      {runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true, '')}>Confirmar registro</button>}
+                    </div>
+                  )}
+                  {run.report && (
+                    <div className="preview">
+                      <strong>{displayLabel(String(nodes.find(n=>n.type==='report')?.data.config.title || 'Informe'))} · {run.report.count} registros</strong>
+                      <div><span>Total</span><b>{run.report.total}</b></div>
+                      {run.report.groups.map(g=><div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>{g.total}</b></div>)}
+                    </div>
+                  )}
+                  {!!run.sources?.length && <p className="sources">Fuentes: {run.sources.map(s=>`${displayLabel(s.name)}${s.page ? `, página ${s.page}` : s.sheet ? `, hoja ${s.sheet}` : ''}`).join(' · ')}</p>}
+                  {run.steps.map(s=><details key={s.node_id}><summary>{displayLabel(nodes.find(n=>n.id===s.node_id)?.data.label || s.node_id)} · {displayStatus(s.status)}</summary><pre>{typeof s.output === 'string' ? s.output : JSON.stringify(displayOutput(s.output),null,2)}</pre></details>)}
+                </>
+              ) : (
+                <div className="empty-result"><span>✦</span><div><strong>Todo listo</strong><p>Ejecuta una prueba para ver el resultado aquí.</p></div></div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="records">{records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}</div>
+        )}
+      </div>
     </section>
-    <aside className={`inspector panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}><div className="inspector-head"><div><span className="section-kicker">CONFIGURACIÓN DEL NODO</span><h2>{current ? 'Configurar nodo' : 'Selecciona un nodo'}</h2></div>{current && <button className="icon-button" aria-label="Cerrar configuración del nodo" onClick={()=>setSelected('')}><X size={18}/></button>}</div>{current ? <><div className="selected-card"><span className={`node-icon ${meta(current.type).color}`}>{meta(current.type).icon}</span><div><strong>{displayLabel(current.data.label)}</strong><small>{meta(current.type).description}</small></div><span className="selected-dot"/></div><div className="settings"><label>Nombre del nodo<input value={displayLabel(current.data.label)} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selected?{...n,data:{...n.data,label:e.target.value}}:n))}/></label><p className="settings-intro">{current.type === 'knowledge' ? 'Proporciona información que el agente pueda usar para responder preguntas.' : current.type === 'agent' ? 'Elige qué debe hacer este agente con el mensaje.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p><Settings node={current} docs={docs} update={updateConfig} upload={upload} removeDoc={removeDoc} busy={busy}/><button className="delete-button" onClick={()=>{setNodes(ns=>ns.filter(n=>n.id!==selected));setEdges(es=>es.filter(e=>e.source!==selected&&e.target!==selected));setSelected('');setRun(null);}}><Trash2 size={15}/> Eliminar nodo</button></div></> : <div className="empty-inspector"><span>✧</span><p>Selecciona un nodo en el lienzo para ver su configuración.</p></div>}<div className="inspector-foot"><BookOpen size={16}/><span>{showcase ? 'La demostración usa ejemplos. Los cambios se pierden al recargar.' : <>Los cambios se guardan al seleccionar <strong>Guardar</strong>.</>}</span></div></aside></main>
+    <aside className={`inspector panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}><div className="inspector-head"><div><span className="section-kicker">CONFIGURACIÓN DEL NODO</span><h2>{current ? 'Configurar nodo' : 'Selecciona un nodo'}</h2></div>{current && <button className="icon-button" aria-label="Cerrar configuración del nodo" onClick={()=>setSelected('')}><X size={18}/></button>}</div>{current ? <><div className="selected-card"><span className={`node-icon ${meta(current.type).color}`}>{meta(current.type).icon}</span><div><strong>{displayLabel(current.data.label)}</strong><small>{meta(current.type).description}</small></div><span className="selected-dot"/></div><div className="settings"><label>Nombre del nodo<input value={displayLabel(current.data.label)} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selected?{...n,data:{...n.data,label:e.target.value}}:n))}/></label><p className="settings-intro">{current.type === 'knowledge' ? 'Proporciona información (texto, PDF o Excel) que el agente pueda usar para responder.' : current.type === 'agent' ? 'Elige qué debe hacer este agente con el mensaje.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p><Settings node={current} docs={docs} update={updateConfig} upload={upload} removeDoc={removeDoc} busy={busy}/><button className="delete-button" onClick={()=>{setNodes(ns=>ns.filter(n=>n.id!==selected));setEdges(es=>es.filter(e=>e.source!==selected&&e.target!==selected));setSelected('');setRun(null);}}><Trash2 size={15}/> Eliminar nodo</button></div></> : <div className="empty-inspector"><span>✧</span><p>Selecciona un nodo en el lienzo para ver su configuración.</p></div>}<div className="inspector-foot"><BookOpen size={16}/><span>{showcase ? 'Todo corre en tu navegador (Vercel). Los archivos cargados viven en esta pestaña.' : <>Los cambios se guardan al seleccionar <strong>Guardar</strong>.</>}</span></div></aside></main>
     {(error || notice) && <div role="status" className={`toast ${error?'error':''}`}><span>{error || notice}</span><button aria-label="Cerrar mensaje" onClick={()=>{setError('');setNotice('');}}><X size={16}/></button></div>}
   </div>;
 }
 function Settings({node, docs, update, upload, removeDoc, busy}: {node:FlowNode; docs:Doc[]; update:(k:string,v:unknown)=>void; upload:(f?:File)=>void; removeDoc:(id:string)=>void; busy:boolean}) {
   const c: Config = node.data.config; const value = (k:string) => String(c[k] ?? '');
-  if (node.type === 'message') return <div className="hint"><strong>Punto de inicio</strong><p>El mensaje introducido en la prueba inicia el flujo.</p></div>;
-  if (node.type === 'knowledge') { const ids = (c.document_ids as string[]) || []; return <><label>Texto de conocimiento<textarea rows={5} value={value('text')} onChange={e=>update('text',e.target.value)} placeholder="Pega información para tu asistente…"/></label>{!showcase && <><div className="label-row"><strong>Documentos</strong><span>{ids.length}/3 seleccionados</span></div><p className="field-help">PDF o TXT, hasta 5 MB cada uno. Contexto combinado: 24.000 caracteres.</p><label className="upload"><Upload size={17}/> Cargar un documento<input type="file" accept=".pdf,.txt,application/pdf,text/plain" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label><div className="documents">{docs.map(d=><div className="document" key={d.id}><input aria-label={`Usar ${d.name}`} type="checkbox" checked={ids.includes(d.id)} disabled={!ids.includes(d.id)&&ids.length>=3} onChange={e=>update('document_ids',e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id))}/><FileText size={17}/><span title={d.name}>{d.name}<small>{d.text_length.toLocaleString()} caracteres</small></span><button aria-label={`Eliminar ${d.name}`} onClick={()=>removeDoc(d.id)} disabled={busy}><Trash2 size={15}/></button></div>)}{!docs.length && <p className="field-help">Aún no se han cargado documentos.</p>}</div></>}</>; }
-  if(node.type==='agent') return <><label>Tarea del agente<select value={value('mode')} onChange={e=>update('mode',e.target.value)}><option value="answer">Responder con la base de conocimiento</option><option value="extract">Extraer gasto</option><option value="query">Extraer filtros del informe</option></select></label><label>Instrucciones<textarea rows={5} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Añade instrucciones para el agente…"/></label><div className="hint"><strong>Acerca del modo de demostración local</strong><p>{showcase ? 'La demostración web muestra resultados de ejemplo. No usa IA ni aplica las instrucciones.' : 'El modo de demostración usa coincidencias deterministas, no un modelo de lenguaje; no aplica las instrucciones. La IA en vivo se configura solo en el servidor y permite responder preguntas.'}</p></div></>;
+  if (node.type === 'message') return <div className="hint"><strong>Punto de inicio</strong><p>Cada mensaje enviado en el chat WhatsApp inicia el flujo desde aquí.</p></div>;
+  if (node.type === 'knowledge') {
+    const ids = (c.document_ids as string[]) || [];
+    return <>
+      <label>Texto adicional<textarea rows={4} value={value('text')} onChange={e=>update('text',e.target.value)} placeholder="Pega información extra para tu asistente…"/></label>
+      <div className="label-row"><strong>Documentos (PDF / Excel / CSV)</strong><span>{ids.length}/3 seleccionados</span></div>
+      <p className="field-help">Sube un menú en PDF o un inventario en Excel (.xlsx, .xls, .csv) hasta 5 MB.</p>
+      <label className="upload"><Upload size={17}/> Cargar PDF, Excel o TXT<input type="file" accept=".pdf,.txt,.xlsx,.xls,.csv,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>
+      <div className="documents">{docs.map(d=><div className="document" key={d.id}><input aria-label={`Usar ${d.name}`} type="checkbox" checked={ids.includes(d.id)} disabled={!ids.includes(d.id)&&ids.length>=3} onChange={e=>update('document_ids',e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id))}/><FileText size={17}/><span title={d.name}>{d.name}<small>{d.text_length.toLocaleString()} caracteres</small></span><button aria-label={`Eliminar ${d.name}`} onClick={()=>removeDoc(d.id)} disabled={busy}><Trash2 size={15}/></button></div>)}{!docs.length && <p className="field-help">Aún no se han cargado documentos.</p>}</div>
+    </>;
+  }
+  if(node.type==='agent') return <><label>Tarea del agente<select value={value('mode')} onChange={e=>update('mode',e.target.value)}><option value="answer">Responder con la base de conocimiento</option><option value="extract">Extraer gasto</option><option value="query">Extraer filtros del informe</option></select></label><label>Instrucciones<textarea rows={4} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Añade instrucciones o saludo para el agente…"/></label><div className="hint"><strong>Motor local en navegador</strong><p>{showcase ? 'Consulta automáticamente tus documentos PDF/Excel conectados y extrae gastos o filtros sin necesidad de backend.' : 'El modo local usa coincidencias deterministas; la IA en vivo se configura en el servidor.'}</p></div></>;
   if(node.type==='reply') return <label>Plantilla de respuesta<textarea rows={5} value={value('template')} onChange={e=>update('template',e.target.value)} placeholder="Deja este campo vacío para usar el resultado anterior."/><span className="field-help">Deja este campo vacío para usar el resultado del paso anterior.</span></label>;
-  if(node.type==='register') return <div className="hint"><strong>Colección: Gastos</strong><p>Se muestra una vista previa antes de guardar.</p></div>;
+  if(node.type==='register') return <div className="hint"><strong>Colección: Gastos</strong><p>Se muestra una vista previa en el chat antes de guardar.</p></div>;
   if(node.type==='query') return <><label>Período<select value={value('period')} onChange={e=>update('period',e.target.value)}><option value="all">Todo el tiempo</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label><label>Categoría<select value={value('category')} onChange={e=>update('category',e.target.value)}><option value="">Todas las categorías</option>{['food','transport','supplies','utilities','other'].map(category=><option key={category} value={category}>{displayCategory(category)}</option>)}</select></label><p className="field-help">El período o la categoría seleccionados reemplazan los filtros extraídos del mensaje.</p></>;
   return <><label>Título del informe<input value={displayLabel(value('title'))} onChange={e=>update('title',e.target.value)}/></label><label>Agrupar por<select value={value('group_by')} onChange={e=>update('group_by',e.target.value)}><option value="category">Categoría</option><option value="none">Sin agrupar</option></select></label><div className="hint"><strong>Campo de importe: importe</strong><p>Los totales se calculan a partir de los gastos guardados.</p></div></>;
 }

@@ -24,3 +24,34 @@
   .topbar { height: auto; min-height: 65px; flex-wrap: wrap; gap: 8px; padding-block: 8px; }
   .presentation-dialog { width: calc(100% - 12px); height: calc(100dvh - 12px); border-radius: 10px; }
 }
+
+
+/* WhatsApp chat simulator */
+.wa-shell{margin-top:12px;border:1px solid #dfe6ee;border-radius:14px;overflow:hidden;display:flex;flex-direction:column;background:#efeae2}
+.wa-topbar{background:#075e54;color:#fff;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.wa-avatar{width:32px;height:32px;border-radius:50%;background:#25d366;color:#063e37;display:grid;place-items:center;font-weight:800;font-size:15px;flex:none}
+.wa-peer{display:flex;flex-direction:column;min-width:120px}
+.wa-peer strong{font-size:12px;line-height:1.2}
+.wa-peer small{font-size:10px;color:#cde7e2}
+.wa-chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.wa-chip{border:1px solid #ffffff38;background:#ffffff1c;color:#fff;border-radius:999px;padding:4px 9px;font-size:10px;font-weight:600}
+.wa-chip:hover{background:#ffffff30}
+.wa-clear{border:0;background:#ffffff24;color:#fff;border-radius:7px;padding:5px 9px;font-size:10px;font-weight:700}
+.wa-messages{padding:12px 14px;min-height:175px;max-height:245px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.wa-empty{margin:auto;text-align:center;color:#6f7d8c;font-size:11px;max-width:340px;display:grid;place-items:center;gap:6px}
+.wa-row{display:flex}
+.wa-row.user{justify-content:flex-end}
+.wa-row.bot{justify-content:flex-start}
+.wa-bubble{max-width:82%;padding:8px 11px 6px;border-radius:11px;font-size:11px;line-height:1.45;box-shadow:0 1px 2px #0000001a;color:#1f2937}
+.wa-bubble.user{background:#d9fdd3;border-top-right-radius:3px}
+.wa-bubble.bot{background:#fff;border-top-left-radius:3px}
+.wa-bubble.bot.is-error{background:#fff0ee;color:#9e3c36;border:1px solid #f5cbc8}
+.wa-bubble p{margin:0;white-space:pre-wrap}
+.wa-card{margin-top:7px;background:#f5f7fa;border:1px solid #e4e9f0;border-radius:8px;padding:7px 9px;display:grid;gap:4px;font-size:10px}
+.wa-card>div{display:flex;justify-content:space-between;gap:12px}
+.wa-confirm{margin-top:6px;padding:6px 10px}
+.wa-sources{margin-top:6px;font-size:9px;color:#0f766e;font-weight:700}
+.wa-meta{display:block;text-align:right;font-size:9px;color:#6b7280;margin-top:4px}
+.wa-composer{display:flex;gap:8px;padding:9px 11px;background:#f0f2f5;border-top:1px solid #dfe6ee}
+.wa-composer input{flex:1;border:1px solid #dce3ec;background:#fff;border-radius:20px;padding:8px 14px;font-size:11px;color:#1f2937}
+.wa-composer .button{border-radius:20px;padding:8px 14px}

@@ -1,8 +1,8 @@
 [
   {
     "id": "assistant",
-    "name": "Asistente de documentos",
-    "description": "Responde con información de tu base de conocimiento.",
+    "name": "Asistente de Menú e Inventario",
+    "description": "Responde en chat consultando tu menú (PDF) y tu inventario (Excel).",
     "nodes": [
       {
         "id": "message",
@@ -26,8 +26,11 @@
         "data": {
           "label": "Base de conocimiento",
           "config": {
-            "text": "Nodaly es una herramienta visual de flujos de trabajo para demostraciones en clase.",
-            "document_ids": []
+            "text": "",
+            "document_ids": [
+              "sample-menu-pdf",
+              "sample-inventory-xlsx"
+            ]
           }
         }
       },
@@ -78,7 +81,7 @@
         "target": "agent"
       }
     ],
-    "message": "¿Qué es Nodaly?"
+    "message": "¿Qué tacos tienen y cuánto cuestan?"
   },
   {
     "id": "capture",

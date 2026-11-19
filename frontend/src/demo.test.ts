@@ -1,29 +1,71 @@
 import { describe, expect, it } from 'vitest';
+import * as XLSX from 'xlsx';
 import { createDemo } from './demo';
+import { parseSpreadsheetBuffer } from './documents';
 import type fixture from './demo-templates.json';
 
 describe('browser showcase', () => {
-  it('runs all three classroom templates and forgets confirmed records on reload', async () => {
+  it('runs all three templates with real knowledge, extraction, and reporting', async () => {
     const api = createDemo();
     const templates = await api('/templates') as typeof fixture;
     expect(templates.map(({ id }: { id: string }) => id)).toEqual(['assistant', 'capture', 'report']);
-    const run = (id: string, confirm = false) => {
-      const template = templates.find((flow: { id: string }) => flow.id === id);
-      return api('/run', { body: JSON.stringify({ ...template, run_id: id, confirm }) });
+    const run = (id: string, confirm = false, message?: string) => {
+      const template = templates.find((flow: { id: string }) => flow.id === id)!;
+      return api('/run', { body: JSON.stringify({ ...template, ...(message ? { message } : {}), run_id: id, confirm }) });
     };
-    expect(await run('assistant')).toMatchObject({ status: 'completed', mode: 'showcase' });
+
+    const assistantRes = await run('assistant') as { status: string; mode: string; reply: string; sources: { name: string }[] };
+    expect(assistantRes).toMatchObject({ status: 'completed', mode: 'showcase' });
+    expect(assistantRes.reply).toContain('Taco al pastor');
+    expect(assistantRes.sources.length).toBeGreaterThan(0);
+
     expect(await run('capture')).toMatchObject({ status: 'awaiting_confirmation' });
     expect(await run('capture', true)).toMatchObject({ status: 'completed' });
-    await run('capture', true);
     expect(await run('report')).toMatchObject({ report: { count: 3, total: '48.75' } });
     expect(await createDemo()('/records')).toHaveLength(2);
   });
 
-  it('does not simulate success for a disconnected flow or allow file uploads', async () => {
+  it('parses an Excel spreadsheet, uploads it, and answers inventory questions', async () => {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet([
+      { Producto: 'Café americano', Precio: '$35', Stock: '0', Estado: 'Agotado' },
+      { Producto: 'Croissant', Precio: '$40', Stock: '15', Estado: 'Disponible' },
+    ]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Inventario');
+    const buffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+
+    const parsed = parseSpreadsheetBuffer(buffer, 'cafeteria.xlsx');
+    expect(parsed.kind).toBe('excel');
+    expect(parsed.sections[0]?.rows).toHaveLength(2);
+
+    const api = createDemo();
+    const uploaded = await api('/documents', { method: 'POST', body: JSON.stringify(parsed) }) as { id: string; name: string };
+    expect(uploaded.name).toBe('cafeteria.xlsx');
+
+    const [assistant] = await api('/templates') as typeof fixture;
+    const customNodes = assistant.nodes.map((n) =>
+      n.type === 'knowledge' ? { ...n, data: { ...n.data, config: { text: '', document_ids: [uploaded.id] } } } : n,
+    );
+    const res = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        nodes: customNodes,
+        edges: assistant.edges,
+        message: '¿Qué productos están agotados?',
+        run_id: 'excel-test',
+        confirm: false,
+      }),
+    }) as { status: string; reply: string };
+
+    expect(res.status).toBe('completed');
+    expect(res.reply).toContain('Café americano');
+  });
+
+  it('does not simulate success for a disconnected flow or empty document upload', async () => {
     const api = createDemo();
     const [template] = await api('/templates') as typeof fixture;
     expect(await api('/run', { body: JSON.stringify({ ...template, edges: [], run_id: 'broken' }) }))
       .toMatchObject({ status: 'error' });
-    await expect(api('/documents', { method: 'POST' })).rejects.toThrow();
+    await expect(api('/documents', { method: 'POST', body: '{}' })).rejects.toThrow();
   });
 });
