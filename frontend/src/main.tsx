@@ -2,17 +2,29 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ReactFlow, ReactFlowProvider, useReactFlow, useNodesInitialized, Position, Background, Controls, addEdge, applyNodeChanges, applyEdgeChanges, type Node, type Edge, type NodeChange, type EdgeChange, type Connection } from '@xyflow/react';
-import { ArrowUpRight, BookOpen, Check, ChevronDown, CircleHelp, Database, FileText, MessageCircle, Play, Presentation, Plus, Save, Send, Trash2, Upload, X, Zap } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, CircleHelp, Database, Eye, FileText, MessageCircle, Play, Presentation, Plus, Save, Send, Sparkles, Trash2, Upload, X, Zap } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import './style.css';
 import { createDemo } from './demo';
-import { parseDocumentFile } from './documents';
+import { parseDocumentFile, type StoredDocument } from './documents';
 import { defaultConfig, kinds, runPresentation, updateDimensions, displayLabel, displayStatus, displayCategory, displayField, displayOutput, type Kind, type FlowNode, type FlowEdge, type Config } from './model';
 
 type Flow = { id: string; name: string; description?: string; nodes: FlowNode[]; edges: FlowEdge[]; message?: string };
-type Doc = { id: string; name: string; text_length: number };
+type Doc = { id: string; name: string; kind?: string; text_length: number };
 type Step = { node_id: string; status: string; output: unknown };
-type Run = { run_id: string; status: string; mode: string; steps: Step[]; reply: string; error?: string; preview?: Record<string, unknown>; sources?: {name: string; page?: number; sheet?: string}[]; report?: {title?: string; total: string; count: number; groups: {category: string; total: string; count: number}[]} };
+type Run = {
+  run_id: string;
+  status: string;
+  mode: string;
+  used_llm?: boolean;
+  llm_model?: string;
+  steps: Step[];
+  reply: string;
+  error?: string;
+  preview?: Record<string, unknown>;
+  sources?: { name: string; page?: number; sheet?: string }[];
+  report?: { title?: string; total: string; count: number; groups: { category: string; total: string; count: number }[] };
+};
 type RecordItem = { id: string; date: string; concept: string; category: string; amount: string };
 type ChatEntry = {
   id: string;
@@ -62,6 +74,7 @@ function FitCanvas({ version, container }: { version: number; container: React.R
   }, [ready, version, fitView, container]);
   return null;
 }
+
 function App() {
   const [templates, setTemplates] = useState<Flow[]>([]); const [flows, setFlows] = useState<Flow[]>([]);
   const [nodes, setNodes] = useState<FlowNode[]>([]); const [measurements, setMeasurements] = useState<Record<string, {width:number; height:number}>>({}); const [edges, setEdges] = useState<FlowEdge[]>([]);
@@ -74,12 +87,15 @@ function App() {
   const [run, setRun] = useState<Run | null>(null); const [busy, setBusy] = useState(false); const [running, setRunning] = useState(false);
   const [tab, setTab] = useState<'chat'|'test'|'records'>('chat');
   const [chatHistory, setChatHistory] = useState<ChatEntry[]>([]);
+  const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const presentationDialog = useRef<HTMLDialogElement>(null);
+  const docDialog = useRef<HTMLDialogElement>(null);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const current = nodes.find(n => n.id === selected);
   const refreshDocs = () => api<Doc[]>('/documents').then(setDocs);
   const refreshRecords = () => api<RecordItem[]>('/records').then(setRecords);
   const refreshFlows = () => api<Flow[]>('/workflows').then(setFlows);
+
   useEffect(() => {
     Promise.all([api<{mode:string}>('/health'), api<Flow[]>('/templates'), api<Flow[]>('/workflows'), api<Doc[]>('/documents'), api<RecordItem[]>('/records')])
       .then(([health, ts, fs, ds, rs]) => { setMode(health.mode); setTemplates(ts); setFlows(fs); setDocs(ds); setRecords(rs); if (ts[0]) load(ts[0], false); })
@@ -121,7 +137,22 @@ function App() {
   }, []);
   const onEdgesChange = useCallback((changes: EdgeChange[]) => { setEdges(es => applyEdgeChanges(changes, es as Edge[]) as FlowEdge[]); if (changes.some(c => c.type === 'remove')) setRun(null); }, []);
   const onConnect = useCallback((connection: Connection) => { setEdges(es => addEdge(connection, es as Edge[]) as FlowEdge[]); setRun(null); }, []);
-  async function save() { setBusy(true); setError(''); try { const id = flowId || crypto.randomUUID(); await api<Flow>(`/workflows/${id}`, {...json({name, nodes, edges}), method:'PUT'}); setFlowId(id); await refreshFlows(); setNotice('Flujo guardado.'); } catch(e) { setError((e as Error).message); } finally {setBusy(false);} }
+
+  async function save() {
+    setBusy(true);
+    setError('');
+    try {
+      const id = flowId || crypto.randomUUID();
+      await api<Flow>(`/workflows/${id}`, { ...json({ name, nodes, edges }), method: 'PUT' });
+      setFlowId(id);
+      await refreshFlows();
+      setNotice('Flujo y nodos guardados en este navegador.');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function execute(confirm = false, overrideMessage?: string) {
     const activeMessage = overrideMessage ?? message;
@@ -133,13 +164,28 @@ function App() {
     setBusy(true);
     setError('');
     setNotice('');
+
+    const historyPayload = chatHistory
+      .filter(entry => !entry.isError)
+      .slice(-8)
+      .map(entry => ({
+        role: entry.sender === 'user' ? 'user' : 'assistant',
+        content: entry.text,
+      }));
+
     if (!confirm) {
       setChatHistory(prev => [...prev, { id: crypto.randomUUID(), sender: 'user', text: activeMessage, time: nowTime() }]);
-      if (overrideMessage !== undefined) setMessage('');
-      else setMessage('');
+      setMessage('');
     }
     try {
-      const result = await api<Run>('/run', json({ nodes, edges, message: activeMessage, run_id: confirm && run ? run.run_id : crypto.randomUUID(), confirm }));
+      const result = await api<Run>('/run', json({
+        nodes,
+        edges,
+        message: activeMessage,
+        run_id: confirm && run ? run.run_id : crypto.randomUUID(),
+        confirm,
+        history: historyPayload,
+      }));
       setRun(result);
       if (result.error) setError(result.error);
       if (confirm && result.status === 'completed') await refreshRecords();
@@ -180,20 +226,42 @@ function App() {
     setBusy(true);
     setError('');
     try {
+      let created: Doc;
       if (demo) {
         const parsed = await parseDocumentFile(file);
-        await api<Doc>('/documents', json(parsed));
+        created = await api<Doc>('/documents', json(parsed));
       } else {
         const body = new FormData();
         body.append('file', file);
-        await api<Doc>('/documents', { method: 'POST', body });
+        created = await api<Doc>('/documents', { method: 'POST', body });
       }
       await refreshDocs();
-      setNotice('Documento cargado. Selecciónalo abajo para conectarlo a esta base de conocimiento.');
+      // Auto-select the newly uploaded document if the active knowledge node has room.
+      if (current?.type === 'knowledge') {
+        const currentIds = (current.data.config.document_ids as string[]) || [];
+        if (currentIds.length < 3 && !currentIds.includes(created.id)) {
+          updateConfig('document_ids', [...currentIds, created.id]);
+        }
+      }
+      setNotice('Documento cargado y listo para usar en el flujo.');
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function inspectDoc(id: string) {
+    if (!demo) {
+      setNotice('La vista previa de contenido está disponible en modo navegador.');
+      return;
+    }
+    try {
+      const full = await api<StoredDocument>(`/documents/${id}`);
+      setPreviewDoc(full);
+      docDialog.current?.showModal();
+    } catch (e) {
+      setError((e as Error).message);
     }
   }
 
@@ -217,11 +285,21 @@ function App() {
     ? ['Hoy gasté 150 en insumos', 'Ayer pagué $85 de taxi', '2026-11-18 cena 240 pesos']
     : activeAgentMode === 'query'
       ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Gastos de insumos']
-      : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
+      : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué me recomiendas con $100?'];
 
-  const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''}`}; });
+  const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''} ${running ? 'is-running' : ''}`}; });
   return <div className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><span>✦</span></span><span>Nodaly<small>ESTUDIO DE FLUJOS</small></span></div><div className="top-divider"/><div className="top-title"><span>Espacio de trabajo</span><strong>Editor visual de flujos</strong></div><div className="top-actions"><button className="button secondary" onClick={() => { presentationDialog.current?.showModal(); setPresentationOpen(true); }}><Presentation size={16} aria-hidden="true"/> Presentación</button><span className={`mode ${mode}`}><i/> {mode === 'showcase' ? 'En navegador (Vercel)' : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span><button className="icon-button help" title="Cómo usar" onClick={() => setNotice('Elige una plantilla, selecciona los nodos para configurarlos (puedes subir tu propio PDF o Excel) y conversa en el chat simulado tipo WhatsApp.')}><CircleHelp size={19}/></button></div></header>
+    <header className="topbar">
+      <div className="brand"><span className="brand-mark"><span>✦</span></span><span>Nodaly<small>ESTUDIO DE FLUJOS</small></span></div>
+      <div className="top-divider"/>
+      <div className="top-title"><span>Espacio de trabajo</span><strong>Editor visual de flujos</strong></div>
+      <div className="top-actions">
+        <button className="button secondary" onClick={() => { presentationDialog.current?.showModal(); setPresentationOpen(true); }}><Presentation size={16} aria-hidden="true"/> Presentación</button>
+        <span className={`mode ${mode}`}><i/> {mode === 'showcase' ? (run?.used_llm ? 'OpenRouter conectado' : 'En navegador (Vercel)') : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span>
+        <button className="icon-button help" title="Cómo usar" onClick={() => setNotice('Conecta tus nodos, sube un PDF o Excel en Base de conocimiento, guarda tu flujo si lo editas y conversa en el chat simulado tipo WhatsApp.')}><CircleHelp size={19}/></button>
+      </div>
+    </header>
+
     <dialog ref={presentationDialog} className="presentation-dialog" aria-labelledby="presentation-title" onClose={() => setPresentationOpen(false)}>
       <div className="presentation-content">
         <header className="presentation-toolbar">
@@ -231,159 +309,273 @@ function App() {
         {presentationOpen && <iframe src="./presentaciones/nodaly-fepi.html" title="Diapositivas del proyecto Nodaly" sandbox="allow-scripts" allowFullScreen />}
       </div>
     </dialog>
-    <main className="workspace"><aside className={`library panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}><div className="sidebar-heading"><div><span className="section-kicker">CREA TU FLUJO</span><h2>Biblioteca de nodos</h2></div><span className="count">7</span></div><p className="muted">Todo lo que necesitas para crear un asistente útil.</p><div className="library-list">{kinds.map(k => <button key={k.type} className="library-item" onClick={() => addNode(k.type)}><span className={`node-icon ${k.color}`}>{k.icon}</span><span><strong>{k.label}</strong><small>{k.description}</small></span><Plus className="add-icon" size={17}/></button>)}</div><div className="library-tip"><span>✦</span><div><strong>Personaliza tu flujo</strong><p>Añade nodos y conéctalos. Selecciona un nodo para editar su configuración.</p></div></div></aside>
-    <section className="center"><div className="canvas-toolbar"><div><div className="breadcrumb">Mi espacio de trabajo <span>/</span> <strong>Editor de flujos</strong></div><input aria-label="Nombre del flujo" className="workflow-name" disabled={busy} value={displayLabel(name)} onChange={e=>setName(e.target.value)} /></div><div className="toolbar-actions"><label className="select-wrap"><span className="sr-only">Elegir una plantilla</span><select disabled={busy} value="" onChange={e=>{const f=templates.find(t=>t.id===e.target.value); if(f) load(f,false);}}><option value="">Plantillas</option>{templates.map(t=><option key={t.id} value={t.id}>{displayLabel(t.name)}</option>)}</select><ChevronDown size={15}/></label>{!showcase && <><label className="select-wrap"><span className="sr-only">Abrir flujo guardado</span><select disabled={busy} value="" onChange={e=>{const f=flows.find(t=>t.id===e.target.value); if(f) load(f,true);}}><option value="">Flujos guardados</option>{flows.map(f=><option key={f.id} value={f.id}>{displayLabel(f.name)}</option>)}</select><ChevronDown size={15}/></label><button className="button secondary" onClick={save} disabled={busy || !nodes.length}><Save size={16}/> Guardar</button></>}<button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={15} fill="currentColor"/> {running ? 'Ejecutando…' : 'Probar mensaje'}</button></div></div>
-      <div className="canvas-wrap" ref={canvasRef}><div className="canvas-caption"><span className="live-dot"/> Tu lienzo <span className="caption-detail">· Arrastra para mover y conecta para crear</span></div><ReactFlow ariaLabelConfig={ariaLabels} nodes={displayed} edges={edges.map(edge => ({...edge, ariaLabel: `Conexión de ${displayLabel(nodes.find(n => n.id === edge.source)?.data.label || edge.source)} a ${displayLabel(nodes.find(n => n.id === edge.target)?.data.label || edge.target)}`})) as Edge[]} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_,n)=>setSelected(n.id)} onPaneClick={()=>setSelected('')} nodesDraggable={!busy} nodesConnectable={!busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace','Delete']} minZoom={0.2}><FitCanvas version={fitVersion} container={canvasRef}/><Background gap={24} size={1.3} color="#cbd4e2"/><Controls showInteractive={false}/></ReactFlow><div className="canvas-footer"><span><span className="live-dot"/> {nodes.length} nodos</span><span>{edges.length} conexiones</span></div></div>
-      <div className="test-panel panel">
-        <div className="test-heading">
-          <div>
-            <span className="test-symbol">{tab === 'chat' ? <MessageCircle size={17}/> : tab === 'records' ? <Database size={17}/> : <Zap size={17}/>}</span>
+
+    <dialog ref={docDialog} className="doc-dialog" aria-labelledby="doc-preview-title" onClose={() => setPreviewDoc(null)}>
+      {previewDoc && (
+        <div className="doc-dialog-body">
+          <header className="doc-dialog-head">
             <div>
-              <h2>{tab === 'chat' ? 'Simulador de chat (WhatsApp)' : tab === 'records' ? 'Registros guardados' : 'Detalle técnico del flujo'}</h2>
-              <p>{tab === 'chat' ? 'Habla con el bot conectado a tus nodos y documentos.' : 'Inspecciona el estado paso a paso o revisa los registros.'}</p>
+              <span className="section-kicker">{previewDoc.kind.toUpperCase()}</span>
+              <h2 id="doc-preview-title">{previewDoc.name}</h2>
             </div>
+            <button className="icon-button" aria-label="Cerrar vista previa" onClick={() => docDialog.current?.close()} autoFocus><X size={20}/></button>
+          </header>
+          <div className="doc-dialog-content">
+            {previewDoc.sections.map((sec, idx) => (
+              <section key={idx} className="doc-section">
+                <h3>{sec.label}</h3>
+                {sec.rows?.length ? (
+                  <div className="doc-table-wrap">
+                    <table className="doc-table">
+                      <thead>
+                        <tr>{Object.keys(sec.rows[0]).map(col => <th key={col}>{col}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {sec.rows.map((row, rIdx) => (
+                          <tr key={rIdx}>{Object.keys(sec.rows![0]).map(col => <td key={col}>{row[col] ?? ''}</td>)}</tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <pre className="doc-pre">{sec.text}</pre>
+                )}
+              </section>
+            ))}
           </div>
-          <div className="tabs">
-            <button className={tab==='chat'?'active':''} onClick={()=>setTab('chat')}>Chat WhatsApp</button>
-            <button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Detalle técnico</button>
-            <button className={tab==='records'?'active':''} onClick={()=>{setTab('records'); refreshRecords().catch(e=>setError(e.message));}}>Registros</button>
+        </div>
+      )}
+    </dialog>
+
+    <main className="workspace">
+      <aside className={`library panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}>
+        <div className="sidebar-heading"><div><span className="section-kicker">CREA TU FLUJO</span><h2>Biblioteca de nodos</h2></div><span className="count">7</span></div>
+        <p className="muted">Arrastra o haz clic para añadir nodos a tu flujo.</p>
+        <div className="library-list">{kinds.map(k => <button key={k.type} className="library-item" onClick={() => addNode(k.type)}><span className={`node-icon ${k.color}`}>{k.icon}</span><span><strong>{k.label}</strong><small>{k.description}</small></span><Plus className="add-icon" size={17}/></button>)}</div>
+        <div className="library-tip"><span>✦</span><div><strong>Personaliza y guarda</strong><p>Conecta tus nodos, configura cada paso y pulsa Guardar para conservar tu flujo.</p></div></div>
+      </aside>
+
+      <section className="center">
+        <div className="canvas-toolbar">
+          <div>
+            <div className="breadcrumb">Mi espacio de trabajo <span>/</span> <strong>Editor de flujos</strong></div>
+            <input aria-label="Nombre del flujo" className="workflow-name" disabled={busy} value={displayLabel(name)} onChange={e=>setName(e.target.value)} />
+          </div>
+          <div className="toolbar-actions">
+            <label className="select-wrap"><span className="sr-only">Elegir una plantilla</span><select disabled={busy} value="" onChange={e=>{const f=templates.find(t=>t.id===e.target.value); if(f) load(f,false);}}><option value="">Plantillas</option>{templates.map(t=><option key={t.id} value={t.id}>{displayLabel(t.name)}</option>)}</select><ChevronDown size={15}/></label>
+            <label className="select-wrap"><span className="sr-only">Abrir flujo guardado</span><select disabled={busy} value="" onChange={e=>{const f=flows.find(t=>t.id===e.target.value); if(f) load(f,true);}}><option value="">Guardados ({flows.length})</option>{flows.map(f=><option key={f.id} value={f.id}>{displayLabel(f.name)}</option>)}</select><ChevronDown size={15}/></label>
+            <button className="button secondary" onClick={save} disabled={busy || !nodes.length}><Save size={16}/> Guardar</button>
+            <button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={15} fill="currentColor"/> {running ? 'Ejecutando…' : 'Probar'}</button>
           </div>
         </div>
 
-        {tab === 'chat' ? (
-          <div className="wa-shell">
-            <div className="wa-topbar">
-              <div className="wa-avatar">✦</div>
-              <div className="wa-peer">
-                <strong>{displayLabel(name)} · Bot</strong>
-                <small>{running ? 'escribiendo…' : 'en línea · conectado al flujo'}</small>
-              </div>
-              <div className="wa-chips">
-                {quickPrompts.map(q => (
-                  <button key={q} className="wa-chip" disabled={busy || !nodes.length} onClick={() => execute(false, q)}>{q}</button>
-                ))}
-              </div>
-              {chatHistory.length > 0 && (
-                <button className="wa-clear" onClick={() => setChatHistory([])} title="Limpiar chat">Limpiar</button>
-              )}
-            </div>
+        <div className="canvas-wrap" ref={canvasRef}>
+          <div className="canvas-caption"><span className="live-dot"/> Tu lienzo <span className="caption-detail">· Arrastra para mover y conecta los puntos</span></div>
+          <ReactFlow ariaLabelConfig={ariaLabels} nodes={displayed} edges={edges.map(edge => ({...edge, animated: running, ariaLabel: `Conexión de ${displayLabel(nodes.find(n => n.id === edge.source)?.data.label || edge.source)} a ${displayLabel(nodes.find(n => n.id === edge.target)?.data.label || edge.target)}`})) as Edge[]} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_,n)=>setSelected(n.id)} onPaneClick={()=>setSelected('')} nodesDraggable={!busy} nodesConnectable={!busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace','Delete']} minZoom={0.2}><FitCanvas version={fitVersion} container={canvasRef}/><Background gap={24} size={1.3} color="#cbd4e2"/><Controls showInteractive={false}/></ReactFlow>
+          <div className="canvas-footer"><span><span className="live-dot"/> {nodes.length} nodos</span><span>{edges.length} conexiones</span></div>
+        </div>
 
-            <div className="wa-messages" ref={chatScrollRef}>
-              {!chatHistory.length ? (
-                <div className="wa-empty">
-                  <MessageCircle size={22}/>
-                  <p>Envía un mensaje o haz clic en una sugerencia para hablar con el bot usando tu flujo actual.</p>
+        <div className="test-panel panel">
+          <div className="test-heading">
+            <div>
+              <span className="test-symbol">{tab === 'chat' ? <MessageCircle size={17}/> : tab === 'records' ? <Database size={17}/> : <Zap size={17}/>}</span>
+              <div>
+                <h2>{tab === 'chat' ? 'Simulador de chat (WhatsApp)' : tab === 'records' ? 'Registros guardados' : 'Detalle técnico del flujo'}</h2>
+                <p>{tab === 'chat' ? 'Habla con el bot conectado a tus nodos y documentos.' : 'Inspecciona el estado paso a paso o revisa los registros.'}</p>
+              </div>
+            </div>
+            <div className="tabs">
+              <button className={tab==='chat'?'active':''} onClick={()=>setTab('chat')}>Chat WhatsApp</button>
+              <button className={tab==='test'?'active':''} onClick={()=>setTab('test')}>Detalle técnico</button>
+              <button className={tab==='records'?'active':''} onClick={()=>{setTab('records'); refreshRecords().catch(e=>setError(e.message));}}>Registros</button>
+            </div>
+          </div>
+
+          {tab === 'chat' ? (
+            <div className="wa-shell">
+              <div className="wa-topbar">
+                <div className="wa-avatar">✦</div>
+                <div className="wa-peer">
+                  <strong>{displayLabel(name)} · Bot</strong>
+                  <small>{running ? 'escribiendo…' : run?.used_llm ? `en línea · OpenRouter (${run.llm_model})` : 'en línea · conectado al flujo'}</small>
                 </div>
-              ) : (
-                chatHistory.map(item => (
-                  <div key={item.id} className={`wa-row ${item.sender}`}>
-                    <div className={`wa-bubble ${item.sender} ${item.isError ? 'is-error' : ''}`}>
-                      <p>{item.text}</p>
-                      {item.run?.preview && item.run.status !== 'error' && (
-                        <div className="wa-card">
-                          {Object.entries(item.run.preview).map(([k, v]) => (
-                            <div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>
-                          ))}
-                          {item.run.status === 'awaiting_confirmation' && run?.run_id === item.run.run_id && (
-                            <button className="button primary wa-confirm" disabled={busy} onClick={() => execute(true, '')}>Confirmar registro</button>
-                          )}
-                        </div>
-                      )}
-                      {item.run?.report && (
-                        <div className="wa-card">
-                          <div><span>Registros</span><b>{item.run.report.count}</b></div>
-                          <div><span>Total</span><b>${item.run.report.total}</b></div>
-                          {item.run.report.groups.map(g => (
-                            <div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>${g.total}</b></div>
-                          ))}
-                        </div>
-                      )}
-                      {!!item.run?.sources?.length && (
-                        <div className="wa-sources">
-                          Fuentes: {item.run.sources.map(s => `${displayLabel(s.name)}${s.page ? ` (pág. ${s.page})` : s.sheet ? ` (${s.sheet})` : ''}`).join(' · ')}
-                        </div>
-                      )}
-                      <span className="wa-meta">{item.time}{item.sender === 'user' ? ' ✓✓' : ''}</span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+                <div className="wa-chips">
+                  {quickPrompts.map(q => (
+                    <button key={q} className="wa-chip" disabled={busy || !nodes.length} onClick={() => execute(false, q)}>{q}</button>
+                  ))}
+                </div>
+                {chatHistory.length > 0 && (
+                  <button className="wa-clear" onClick={() => setChatHistory([])} title="Limpiar chat">Limpiar</button>
+                )}
+              </div>
 
-            <form className="wa-composer" onSubmit={e => { e.preventDefault(); execute(); }}>
-              <input
-                aria-label="Mensaje de chat"
-                disabled={busy || !nodes.length}
-                value={message}
-                onChange={e => setMessage(e.target.value)}
-                placeholder="Escribe un mensaje como en WhatsApp…"
-              />
-              <button type="submit" className="button primary" disabled={busy || !nodes.length || !message.trim()}>
-                <Send size={14}/> Enviar
-              </button>
-            </form>
-          </div>
-        ) : tab === 'test' ? (
-          <div className="test-content">
-            <div className="message-input">
-              <label htmlFor="message">Tu mensaje</label>
-              <textarea id="message" disabled={busy} value={message} onChange={e=>{setMessage(e.target.value); setRun(null);}} placeholder="Escribe un mensaje para probar tu flujo…" rows={2}/>
-              <button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={14} fill="currentColor"/> {running ? 'Ejecutando…' : 'Ejecutar prueba'}</button>
-            </div>
-            <div className="result">
-              {run ? (
-                <>
-                  <div className="result-title">
-                    <span className={`result-badge ${runPresentation(run.status).tone}`}>{run.status === 'completed' ? <Check size={14}/> : run.status === 'error' ? <X size={14}/> : '!'}</span>
-                    <strong>{displayStatus(run.status)}</strong>
-                    <span>{run.mode === 'showcase' ? 'En navegador' : run.mode === 'demo' ? 'Demostración local' : 'IA en vivo'}</span>
+              <div className="wa-messages" ref={chatScrollRef}>
+                {!chatHistory.length ? (
+                  <div className="wa-empty">
+                    <MessageCircle size={22}/>
+                    <p>Envía un mensaje o haz clic en una sugerencia para conversar con el bot usando tus nodos conectados.</p>
                   </div>
-                  {run.reply && <p>{run.reply}</p>}
-                  {run.preview && run.status !== 'error' && (
-                    <div className="preview">
-                      <strong>{runPresentation(run.status).confirm ? 'Revisar antes de guardar' : 'Registro completado'}</strong>
-                      {Object.entries(run.preview).map(([k,v])=><div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>)}
-                      {runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true, '')}>Confirmar registro</button>}
+                ) : (
+                  chatHistory.map(item => (
+                    <div key={item.id} className={`wa-row ${item.sender}`}>
+                      <div className={`wa-bubble ${item.sender} ${item.isError ? 'is-error' : ''}`}>
+                        <p>{item.text}</p>
+                        {item.run?.preview && item.run.status !== 'error' && (
+                          <div className="wa-card">
+                            {Object.entries(item.run.preview).map(([k, v]) => (
+                              <div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>
+                            ))}
+                            {item.run.status === 'awaiting_confirmation' && run?.run_id === item.run.run_id && (
+                              <button className="button primary wa-confirm" disabled={busy} onClick={() => execute(true, '')}>Confirmar registro</button>
+                            )}
+                          </div>
+                        )}
+                        {item.run?.report && (
+                          <div className="wa-card">
+                            <div><span>Registros</span><b>{item.run.report.count}</b></div>
+                            <div><span>Total</span><b>${item.run.report.total}</b></div>
+                            {item.run.report.groups.map(g => (
+                              <div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>${g.total}</b></div>
+                            ))}
+                          </div>
+                        )}
+                        {item.sender === 'bot' && item.run && !item.isError && (
+                          <div className="wa-badges">
+                            {item.run.used_llm && <span className="wa-llm-badge"><Sparkles size={10}/> OpenRouter</span>}
+                            {!!item.run.sources?.length && (
+                              <span className="wa-sources">
+                                Fuentes: {item.run.sources.map(s => `${displayLabel(s.name)}${s.page ? ` (pág. ${s.page})` : s.sheet ? ` (${s.sheet})` : ''}`).join(' · ')}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <span className="wa-meta">{item.time}{item.sender === 'user' ? ' ✓✓' : ''}</span>
+                      </div>
                     </div>
-                  )}
-                  {run.report && (
-                    <div className="preview">
-                      <strong>{displayLabel(String(nodes.find(n=>n.type==='report')?.data.config.title || 'Informe'))} · {run.report.count} registros</strong>
-                      <div><span>Total</span><b>{run.report.total}</b></div>
-                      {run.report.groups.map(g=><div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>{g.total}</b></div>)}
-                    </div>
-                  )}
-                  {!!run.sources?.length && <p className="sources">Fuentes: {run.sources.map(s=>`${displayLabel(s.name)}${s.page ? `, página ${s.page}` : s.sheet ? `, hoja ${s.sheet}` : ''}`).join(' · ')}</p>}
-                  {run.steps.map(s=><details key={s.node_id}><summary>{displayLabel(nodes.find(n=>n.id===s.node_id)?.data.label || s.node_id)} · {displayStatus(s.status)}</summary><pre>{typeof s.output === 'string' ? s.output : JSON.stringify(displayOutput(s.output),null,2)}</pre></details>)}
-                </>
-              ) : (
-                <div className="empty-result"><span>✦</span><div><strong>Todo listo</strong><p>Ejecuta una prueba para ver el resultado aquí.</p></div></div>
-              )}
+                  ))
+                )}
+              </div>
+
+              <form className="wa-composer" onSubmit={e => { e.preventDefault(); execute(); }}>
+                <input
+                  aria-label="Mensaje de chat"
+                  disabled={busy || !nodes.length}
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
+                  placeholder="Escribe un mensaje como en WhatsApp…"
+                />
+                <button type="submit" className="button primary" disabled={busy || !nodes.length || !message.trim()}>
+                  <Send size={14}/> Enviar
+                </button>
+              </form>
             </div>
+          ) : tab === 'test' ? (
+            <div className="test-content">
+              <div className="message-input">
+                <label htmlFor="message">Tu mensaje</label>
+                <textarea id="message" disabled={busy} value={message} onChange={e=>{setMessage(e.target.value); setRun(null);}} placeholder="Escribe un mensaje para probar tu flujo…" rows={2}/>
+                <button className="button primary" onClick={()=>execute()} disabled={busy || !nodes.length || !message.trim()}><Play size={14} fill="currentColor"/> {running ? 'Ejecutando…' : 'Ejecutar prueba'}</button>
+              </div>
+              <div className="result">
+                {run ? (
+                  <>
+                    <div className="result-title">
+                      <span className={`result-badge ${runPresentation(run.status).tone}`}>{run.status === 'completed' ? <Check size={14}/> : run.status === 'error' ? <X size={14}/> : '!'}</span>
+                      <strong>{displayStatus(run.status)}</strong>
+                      <span>{run.used_llm ? `OpenRouter (${run.llm_model})` : run.mode === 'showcase' ? 'Motor local' : run.mode === 'demo' ? 'Demostración local' : 'IA en vivo'}</span>
+                    </div>
+                    {run.reply && <p>{run.reply}</p>}
+                    {run.preview && run.status !== 'error' && (
+                      <div className="preview">
+                        <strong>{runPresentation(run.status).confirm ? 'Revisar antes de guardar' : 'Registro completado'}</strong>
+                        {Object.entries(run.preview).map(([k,v])=><div key={k}><span>{displayField(k)}</span><b>{k === 'category' ? displayCategory(String(v)) : String(v)}</b></div>)}
+                        {runPresentation(run.status).confirm && <button className="button primary" disabled={busy} onClick={()=>execute(true, '')}>Confirmar registro</button>}
+                      </div>
+                    )}
+                    {run.report && (
+                      <div className="preview">
+                        <strong>{displayLabel(String(nodes.find(n=>n.type==='report')?.data.config.title || 'Informe'))} · {run.report.count} registros</strong>
+                        <div><span>Total</span><b>{run.report.total}</b></div>
+                        {run.report.groups.map(g=><div key={g.category}><span>{displayCategory(g.category)} ({g.count})</span><b>{g.total}</b></div>)}
+                      </div>
+                    )}
+                    {!!run.sources?.length && <p className="sources">Fuentes: {run.sources.map(s=>`${displayLabel(s.name)}${s.page ? `, página ${s.page}` : s.sheet ? `, hoja ${s.sheet}` : ''}`).join(' · ')}</p>}
+                    {run.steps.map(s=><details key={s.node_id}><summary>{displayLabel(nodes.find(n=>n.id===s.node_id)?.data.label || s.node_id)} · {displayStatus(s.status)}</summary><pre>{typeof s.output === 'string' ? s.output : JSON.stringify(displayOutput(s.output),null,2)}</pre></details>)}
+                  </>
+                ) : (
+                  <div className="empty-result"><span>✦</span><div><strong>Todo listo</strong><p>Ejecuta una prueba para ver el resultado aquí.</p></div></div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="records">{records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}</div>
+          )}
+        </div>
+      </section>
+
+      <aside className={`inspector panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}>
+        <div className="inspector-head"><div><span className="section-kicker">CONFIGURACIÓN DEL NODO</span><h2>{current ? 'Configurar nodo' : 'Selecciona un nodo'}</h2></div>{current && <button className="icon-button" aria-label="Cerrar configuración del nodo" onClick={()=>setSelected('')}><X size={18}/></button>}</div>
+        {current ? <>
+          <div className="selected-card"><span className={`node-icon ${meta(current.type).color}`}>{meta(current.type).icon}</span><div><strong>{displayLabel(current.data.label)}</strong><small>{meta(current.type).description}</small></div><span className="selected-dot"/></div>
+          <div className="settings">
+            <label>Nombre del nodo<input value={displayLabel(current.data.label)} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selected?{...n,data:{...n.data,label:e.target.value}}:n))}/></label>
+            <p className="settings-intro">{current.type === 'knowledge' ? 'Sube un PDF, Excel o pega texto y visualiza su contenido aquí.' : current.type === 'agent' ? 'Elige la tarea, el modelo de OpenRouter y las instrucciones del agente.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p>
+            <Settings node={current} docs={docs} update={updateConfig} upload={upload} inspectDoc={inspectDoc} removeDoc={removeDoc} busy={busy}/>
+            <button className="delete-button" onClick={()=>{setNodes(ns=>ns.filter(n=>n.id!==selected));setEdges(es=>es.filter(e=>e.source!==selected&&e.target!==selected));setSelected('');setRun(null);}}><Trash2 size={15}/> Eliminar nodo</button>
           </div>
-        ) : (
-          <div className="records">{records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}</div>
-        )}
-      </div>
-    </section>
-    <aside className={`inspector panel ${busy ? 'editing-disabled' : ''}`} aria-disabled={busy}><div className="inspector-head"><div><span className="section-kicker">CONFIGURACIÓN DEL NODO</span><h2>{current ? 'Configurar nodo' : 'Selecciona un nodo'}</h2></div>{current && <button className="icon-button" aria-label="Cerrar configuración del nodo" onClick={()=>setSelected('')}><X size={18}/></button>}</div>{current ? <><div className="selected-card"><span className={`node-icon ${meta(current.type).color}`}>{meta(current.type).icon}</span><div><strong>{displayLabel(current.data.label)}</strong><small>{meta(current.type).description}</small></div><span className="selected-dot"/></div><div className="settings"><label>Nombre del nodo<input value={displayLabel(current.data.label)} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selected?{...n,data:{...n.data,label:e.target.value}}:n))}/></label><p className="settings-intro">{current.type === 'knowledge' ? 'Proporciona información (texto, PDF o Excel) que el agente pueda usar para responder.' : current.type === 'agent' ? 'Elige qué debe hacer este agente con el mensaje.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p><Settings node={current} docs={docs} update={updateConfig} upload={upload} removeDoc={removeDoc} busy={busy}/><button className="delete-button" onClick={()=>{setNodes(ns=>ns.filter(n=>n.id!==selected));setEdges(es=>es.filter(e=>e.source!==selected&&e.target!==selected));setSelected('');setRun(null);}}><Trash2 size={15}/> Eliminar nodo</button></div></> : <div className="empty-inspector"><span>✧</span><p>Selecciona un nodo en el lienzo para ver su configuración.</p></div>}<div className="inspector-foot"><BookOpen size={16}/><span>{showcase ? 'Todo corre en tu navegador (Vercel). Los archivos cargados viven en esta pestaña.' : <>Los cambios se guardan al seleccionar <strong>Guardar</strong>.</>}</span></div></aside></main>
+        </> : <div className="empty-inspector"><span>✧</span><p>Selecciona un nodo en el lienzo para ver su configuración.</p></div>}
+        <div className="inspector-foot"><BookOpen size={16}/><span>{showcase ? 'Tus flujos y archivos se guardan automáticamente en este navegador al pulsar Guardar.' : <>Los cambios se guardan al seleccionar <strong>Guardar</strong>.</>}</span></div>
+      </aside>
+    </main>
     {(error || notice) && <div role="status" className={`toast ${error?'error':''}`}><span>{error || notice}</span><button aria-label="Cerrar mensaje" onClick={()=>{setError('');setNotice('');}}><X size={16}/></button></div>}
   </div>;
 }
-function Settings({node, docs, update, upload, removeDoc, busy}: {node:FlowNode; docs:Doc[]; update:(k:string,v:unknown)=>void; upload:(f?:File)=>void; removeDoc:(id:string)=>void; busy:boolean}) {
+
+function Settings({node, docs, update, upload, inspectDoc, removeDoc, busy}: {node:FlowNode; docs:Doc[]; update:(k:string,v:unknown)=>void; upload:(f?:File)=>void; inspectDoc:(id:string)=>void; removeDoc:(id:string)=>void; busy:boolean}) {
   const c: Config = node.data.config; const value = (k:string) => String(c[k] ?? '');
   if (node.type === 'message') return <div className="hint"><strong>Punto de inicio</strong><p>Cada mensaje enviado en el chat WhatsApp inicia el flujo desde aquí.</p></div>;
   if (node.type === 'knowledge') {
     const ids = (c.document_ids as string[]) || [];
     return <>
-      <label>Texto adicional<textarea rows={4} value={value('text')} onChange={e=>update('text',e.target.value)} placeholder="Pega información extra para tu asistente…"/></label>
-      <div className="label-row"><strong>Documentos (PDF / Excel / CSV)</strong><span>{ids.length}/3 seleccionados</span></div>
-      <p className="field-help">Sube un menú en PDF o un inventario en Excel (.xlsx, .xls, .csv) hasta 5 MB.</p>
+      <label>Texto adicional<textarea rows={3} value={value('text')} onChange={e=>update('text',e.target.value)} placeholder="Pega información extra para tu asistente…"/></label>
+      <div className="label-row"><strong>Documentos (PDF / Excel / CSV)</strong><span>{ids.length}/3 activos</span></div>
+      <p className="field-help">Sube tu menú en PDF o tu inventario en Excel. Haz clic en el ojo para ver lo que se extrajo.</p>
       <label className="upload"><Upload size={17}/> Cargar PDF, Excel o TXT<input type="file" accept=".pdf,.txt,.xlsx,.xls,.csv,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>
-      <div className="documents">{docs.map(d=><div className="document" key={d.id}><input aria-label={`Usar ${d.name}`} type="checkbox" checked={ids.includes(d.id)} disabled={!ids.includes(d.id)&&ids.length>=3} onChange={e=>update('document_ids',e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id))}/><FileText size={17}/><span title={d.name}>{d.name}<small>{d.text_length.toLocaleString()} caracteres</small></span><button aria-label={`Eliminar ${d.name}`} onClick={()=>removeDoc(d.id)} disabled={busy}><Trash2 size={15}/></button></div>)}{!docs.length && <p className="field-help">Aún no se han cargado documentos.</p>}</div>
+      <div className="documents">
+        {docs.map(d=>(
+          <div className="document" key={d.id}>
+            <input aria-label={`Usar ${d.name}`} type="checkbox" checked={ids.includes(d.id)} disabled={!ids.includes(d.id)&&ids.length>=3} onChange={e=>update('document_ids',e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id))}/>
+            <FileText size={16}/>
+            <span title={d.name}>{d.name}<small>{d.text_length.toLocaleString()} caracteres</small></span>
+            <button type="button" title="Ver contenido extraído" aria-label={`Ver ${d.name}`} onClick={()=>inspectDoc(d.id)} disabled={busy}><Eye size={15}/></button>
+            <button type="button" title="Eliminar documento" aria-label={`Eliminar ${d.name}`} onClick={()=>removeDoc(d.id)} disabled={busy}><Trash2 size={15}/></button>
+          </div>
+        ))}
+        {!docs.length && <p className="field-help">Aún no se han cargado documentos.</p>}
+      </div>
     </>;
   }
-  if(node.type==='agent') return <><label>Tarea del agente<select value={value('mode')} onChange={e=>update('mode',e.target.value)}><option value="answer">Responder con la base de conocimiento</option><option value="extract">Extraer gasto</option><option value="query">Extraer filtros del informe</option></select></label><label>Instrucciones<textarea rows={4} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Añade instrucciones o saludo para el agente…"/></label><div className="hint"><strong>Motor local en navegador</strong><p>{showcase ? 'Consulta automáticamente tus documentos PDF/Excel conectados y extrae gastos o filtros sin necesidad de backend.' : 'El modo local usa coincidencias deterministas; la IA en vivo se configura en el servidor.'}</p></div></>;
+  if (node.type === 'agent') return <>
+    <label>Tarea del agente
+      <select value={value('mode')} onChange={e=>update('mode',e.target.value)}>
+        <option value="answer">Responder con la base de conocimiento</option>
+        <option value="extract">Extraer gasto</option>
+        <option value="query">Extraer filtros del informe</option>
+      </select>
+    </label>
+    {value('mode') === 'answer' && (
+      <label>Modelo de OpenRouter
+        <select value={value('model') || 'openai/gpt-4o-mini'} onChange={e=>update('model',e.target.value)}>
+          <option value="openai/gpt-4o-mini">GPT-4o mini (rápido)</option>
+          <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
+          <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku</option>
+          <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B</option>
+        </select>
+      </label>
+    )}
+    <label>Instrucciones<textarea rows={4} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Ej. Responde como mesero amable de Taquería La Esquina…"/></label>
+    <div className="hint"><strong>OpenRouter + respaldo local</strong><p>Si <code>OPENROUTER_API_KEY</code> está configurada en Vercel, el agente usa el modelo seleccionado; si no, responde con el motor local.</p></div>
+  </>;
   if(node.type==='reply') return <label>Plantilla de respuesta<textarea rows={5} value={value('template')} onChange={e=>update('template',e.target.value)} placeholder="Deja este campo vacío para usar el resultado anterior."/><span className="field-help">Deja este campo vacío para usar el resultado del paso anterior.</span></label>;
   if(node.type==='register') return <div className="hint"><strong>Colección: Gastos</strong><p>Se muestra una vista previa en el chat antes de guardar.</p></div>;
   if(node.type==='query') return <><label>Período<select value={value('period')} onChange={e=>update('period',e.target.value)}><option value="all">Todo el tiempo</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label><label>Categoría<select value={value('category')} onChange={e=>update('category',e.target.value)}><option value="">Todas las categorías</option>{['food','transport','supplies','utilities','other'].map(category=><option key={category} value={category}>{displayCategory(category)}</option>)}</select></label><p className="field-help">El período o la categoría seleccionados reemplazan los filtros extraídos del mensaje.</p></>;

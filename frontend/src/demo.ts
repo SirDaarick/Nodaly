@@ -9,22 +9,107 @@ import {
   queryExpenseRecords,
   type ExpenseRecord,
   type KnowledgeSource,
+  type SourceCitation,
 } from './engine';
 import type { FlowEdge, FlowNode } from './model';
 
-type RunRequest = { nodes: FlowNode[]; edges: FlowEdge[]; message: string; run_id: string; confirm: boolean };
+type ChatTurn = { role: 'user' | 'assistant'; content: string };
+type RunRequest = {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  message: string;
+  run_id: string;
+  confirm: boolean;
+  history?: ChatTurn[];
+};
 type SavedWorkflow = { id: string; name: string; nodes: FlowNode[]; edges: FlowEdge[] };
 
+const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v1';
+const DOCUMENTS_KEY = 'nodaly.showcase.documents.v1';
 const today = () => new Date().toISOString().slice(0, 10);
+
+function readStorage<T>(key: string, fallback: T): T {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return fallback;
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorage(key: string, value: unknown): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore quota/storage errors in restricted environments.
+  }
+}
+
+async function tryOpenRouter(
+  message: string,
+  instructions: string,
+  model: string,
+  history: ChatTurn[],
+  sources: KnowledgeSource[],
+): Promise<{ reply: string; model: string } | null> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') return null;
+
+  const flatSources = sources.flatMap((s) =>
+    s.sections.map((sec) => ({
+      name: s.docName,
+      ...(sec.page ? { page: sec.page } : {}),
+      ...(sec.sheet ? { sheet: sec.sheet } : {}),
+      text: sec.text,
+    })),
+  );
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        instructions,
+        model: model || undefined,
+        history,
+        sources: flatSources,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { reply?: string; model?: string; used_llm?: boolean };
+    if (data.used_llm && data.reply) {
+      return { reply: data.reply, model: data.model || model || 'openrouter' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function createDemo() {
   const records: ExpenseRecord[] = [
     { id: 'lunch', date: today(), concept: 'Almuerzo ficticio', category: 'food', amount: '12.50' },
     { id: 'notebooks', date: today(), concept: 'Cuadernos ficticios', category: 'supplies', amount: '23.75' },
   ];
-  const documents: StoredDocument[] = createSampleDocuments();
-  const workflows = new Map<string, SavedWorkflow>();
+
+  const samples = createSampleDocuments();
+  const savedDocs = readStorage<StoredDocument[]>(DOCUMENTS_KEY, []);
+  const documents: StoredDocument[] = [
+    ...samples,
+    ...savedDocs.filter((d) => !samples.some((s) => s.id === d.id)),
+  ];
+
+  const savedWorkflows = readStorage<SavedWorkflow[]>(WORKFLOWS_KEY, []);
+  const workflows = new Map<string, SavedWorkflow>(savedWorkflows.map((w) => [w.id, w]));
   const pendingConfirmations = new Map<string, { fingerprint: string; preview: Omit<ExpenseRecord, 'id'>; committed: boolean }>();
+
+  const persistDocs = () => {
+    const customDocs = documents.filter((d) => !samples.some((s) => s.id === d.id));
+    writeStorage(DOCUMENTS_KEY, customDocs);
+  };
+  const persistWorkflows = () => writeStorage(WORKFLOWS_KEY, [...workflows.values()]);
 
   return async (path: string, options?: RequestInit) => {
     const method = (options?.method ?? 'GET').toUpperCase();
@@ -37,11 +122,18 @@ export function createDemo() {
       const body = JSON.parse(String(options?.body)) as { name: string; nodes: FlowNode[]; edges: FlowEdge[] };
       const saved: SavedWorkflow = { id, name: body.name, nodes: body.nodes, edges: body.edges };
       workflows.set(id, saved);
+      persistWorkflows();
       return saved;
     }
 
     if (method === 'GET' && path === '/documents') {
-      return documents.map(({ id, name, text_length }) => ({ id, name, text_length }));
+      return documents.map(({ id, name, kind, text_length }) => ({ id, name, kind, text_length }));
+    }
+    if (method === 'GET' && path.startsWith('/documents/')) {
+      const id = path.slice('/documents/'.length);
+      const doc = documents.find((d) => d.id === id);
+      if (!doc) throw new Error('Documento no encontrado.');
+      return doc;
     }
     if (method === 'POST' && path === '/documents') {
       const doc = JSON.parse(String(options?.body ?? '{}')) as StoredDocument;
@@ -50,20 +142,22 @@ export function createDemo() {
       }
       const entry: StoredDocument = { ...doc, id: doc.id || crypto.randomUUID() };
       documents.push(entry);
-      return { id: entry.id, name: entry.name, text_length: entry.text_length };
+      persistDocs();
+      return { id: entry.id, name: entry.name, kind: entry.kind, text_length: entry.text_length };
     }
     if (method === 'DELETE' && path.startsWith('/documents/')) {
       const id = path.slice('/documents/'.length);
       const idx = documents.findIndex((d) => d.id === id);
       if (idx === -1) throw new Error('Documento no encontrado.');
       documents.splice(idx, 1);
+      persistDocs();
       return { deleted: true };
     }
 
     if (method === 'GET' && path === '/records') return [...records];
     if (path !== '/run') throw new Error('Esta acción no está disponible en este modo.');
 
-    const { nodes, edges, message, run_id, confirm } = JSON.parse(String(options?.body)) as RunRequest;
+    const { nodes, edges, message, run_id, confirm, history = [] } = JSON.parse(String(options?.body)) as RunRequest;
     const steps: { node_id: string; status: string; output: unknown }[] = [];
     const result: Record<string, unknown> = { run_id, mode: 'showcase', steps, status: 'completed', reply: '' };
     const failRun = (msg: string) => ({ ...result, status: 'error', error: msg });
@@ -172,9 +266,21 @@ export function createDemo() {
           }
 
           if (mode === 'answer') {
-            const { reply, citations } = answerFromSources(message, sources, String(cfg.instructions ?? ''));
-            output = reply;
-            result.sources = citations;
+            const instructions = String(cfg.instructions ?? '');
+            const model = String(cfg.model ?? '');
+            const llm = await tryOpenRouter(message, instructions, model, history, sources);
+            if (llm) {
+              output = llm.reply;
+              result.used_llm = true;
+              result.llm_model = llm.model;
+              const citations: SourceCitation[] = sources.map((s) => ({ name: s.docName }));
+              result.sources = citations;
+            } else {
+              const { reply, citations } = answerFromSources(message, sources, instructions);
+              output = reply;
+              result.used_llm = false;
+              result.sources = citations;
+            }
           } else if (mode === 'extract') {
             output = extractExpense(message);
           } else if (mode === 'query') {
