@@ -37,11 +37,38 @@ type ChatEntry = {
 
 const showcase = import.meta.env.MODE === 'showcase';
 const demo = showcase ? createDemo() : null;
+const BACKEND_URL_KEY = 'nodaly.backendUrl.v1';
 
-async function api<T>(url: string, options?: RequestInit): Promise<T> {
-  if (demo) return await demo(url, options) as T;
+function getInitialBackendUrl(): string {
+  try {
+    const param = new URLSearchParams(window.location.search).get('backend');
+    if (param) {
+      const clean = param.trim().replace(/\/+$/, '');
+      window.localStorage.setItem(BACKEND_URL_KEY, clean);
+      return clean;
+    }
+    return (window.localStorage.getItem(BACKEND_URL_KEY) || '').trim().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function api<T>(url: string, options?: RequestInit, backendUrl = ''): Promise<T> {
+  if (!backendUrl && demo) return await demo(url, options) as T;
+  const base = backendUrl ? `${backendUrl}/api` : '/api';
+  const headers = new Headers(options?.headers);
+  if (backendUrl) headers.set('ngrok-skip-browser-warning', 'true');
+
   let response: Response;
-  try { response = await fetch('/api' + url, options); } catch { throw new Error('No se puede conectar con el servidor local. Inicia el servidor e inténtalo de nuevo.'); }
+  try {
+    response = await fetch(base + url, { ...options, headers });
+  } catch {
+    throw new Error(
+      backendUrl
+        ? `No se pudo conectar con el backend en ${backendUrl}. Verifica que uvicorn y ngrok estén encendidos.`
+        : 'No se puede conectar con el servidor local. Inicia el servidor e inténtalo de nuevo.',
+    );
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `La solicitud falló (${response.status}).`);
   return data as T;
@@ -88,19 +115,29 @@ function App() {
   const [tab, setTab] = useState<'chat'|'test'|'records'>('chat');
   const [chatHistory, setChatHistory] = useState<ChatEntry[]>([]);
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
+  const [backendUrl, setBackendUrl] = useState<string>(() => getInitialBackendUrl());
+  const [backendInput, setBackendInput] = useState<string>(() => getInitialBackendUrl());
   const presentationDialog = useRef<HTMLDialogElement>(null);
   const docDialog = useRef<HTMLDialogElement>(null);
+  const ngrokDialog = useRef<HTMLDialogElement>(null);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const current = nodes.find(n => n.id === selected);
-  const refreshDocs = () => api<Doc[]>('/documents').then(setDocs);
-  const refreshRecords = () => api<RecordItem[]>('/records').then(setRecords);
-  const refreshFlows = () => api<Flow[]>('/workflows').then(setFlows);
+  const refreshDocs = (url = backendUrl) => api<Doc[]>('/documents', undefined, url).then(setDocs);
+  const refreshRecords = (url = backendUrl) => api<RecordItem[]>('/records', undefined, url).then(setRecords);
+  const refreshFlows = (url = backendUrl) => api<Flow[]>('/workflows', undefined, url).then(setFlows);
 
   useEffect(() => {
-    Promise.all([api<{mode:string}>('/health'), api<Flow[]>('/templates'), api<Flow[]>('/workflows'), api<Doc[]>('/documents'), api<RecordItem[]>('/records')])
+    setMode('connecting');
+    Promise.all([
+      api<{mode:string}>('/health', undefined, backendUrl),
+      api<Flow[]>('/templates', undefined, backendUrl),
+      api<Flow[]>('/workflows', undefined, backendUrl),
+      api<Doc[]>('/documents', undefined, backendUrl),
+      api<RecordItem[]>('/records', undefined, backendUrl),
+    ])
       .then(([health, ts, fs, ds, rs]) => { setMode(health.mode); setTemplates(ts); setFlows(fs); setDocs(ds); setRecords(rs); if (ts[0]) load(ts[0], false); })
       .catch(e => { setMode('offline'); setError(e.message); });
-  }, []);
+  }, [backendUrl]);
   useEffect(() => { document.querySelectorAll('.library, .inspector').forEach(el => { if (busy) el.setAttribute('inert', ''); else el.removeAttribute('inert'); }); }, [busy]);
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -143,10 +180,10 @@ function App() {
     setError('');
     try {
       const id = flowId || crypto.randomUUID();
-      await api<Flow>(`/workflows/${id}`, { ...json({ name, nodes, edges }), method: 'PUT' });
+      await api<Flow>(`/workflows/${id}`, { ...json({ name, nodes, edges }), method: 'PUT' }, backendUrl);
       setFlowId(id);
       await refreshFlows();
-      setNotice('Flujo y nodos guardados en este navegador.');
+      setNotice(backendUrl ? 'Flujo guardado en tu backend local (SQLite).' : 'Flujo y nodos guardados en este navegador.');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -185,7 +222,7 @@ function App() {
         run_id: confirm && run ? run.run_id : crypto.randomUUID(),
         confirm,
         history: historyPayload,
-      }));
+      }), backendUrl);
       setRun(result);
       if (result.error) setError(result.error);
       if (confirm && result.status === 'completed') await refreshRecords();
@@ -227,13 +264,13 @@ function App() {
     setError('');
     try {
       let created: Doc;
-      if (demo) {
+      if (!backendUrl && demo) {
         const parsed = await parseDocumentFile(file);
-        created = await api<Doc>('/documents', json(parsed));
+        created = await api<Doc>('/documents', json(parsed), backendUrl);
       } else {
         const body = new FormData();
         body.append('file', file);
-        created = await api<Doc>('/documents', { method: 'POST', body });
+        created = await api<Doc>('/documents', { method: 'POST', body }, backendUrl);
       }
       await refreshDocs();
       // Auto-select the newly uploaded document if the active knowledge node has room.
@@ -252,12 +289,8 @@ function App() {
   }
 
   async function inspectDoc(id: string) {
-    if (!demo) {
-      setNotice('La vista previa de contenido está disponible en modo navegador.');
-      return;
-    }
     try {
-      const full = await api<StoredDocument>(`/documents/${id}`);
+      const full = await api<StoredDocument>(`/documents/${id}`, undefined, backendUrl);
       setPreviewDoc(full);
       docDialog.current?.showModal();
     } catch (e) {
@@ -269,7 +302,7 @@ function App() {
     setBusy(true);
     setError('');
     try {
-      await api(`/documents/${id}`, { method: 'DELETE' });
+      await api(`/documents/${id}`, { method: 'DELETE' }, backendUrl);
       setNodes(ns => ns.map(n => n.type === 'knowledge' ? { ...n, data: { ...n.data, config: { ...n.data.config, document_ids: ((n.data.config.document_ids as string[]) || []).filter(x => x !== id) } } } : n));
       await refreshDocs();
       setRun(null);
@@ -294,11 +327,70 @@ function App() {
       <div className="top-divider"/>
       <div className="top-title"><span>Espacio de trabajo</span><strong>Editor visual de flujos</strong></div>
       <div className="top-actions">
+        <button className="button secondary" onClick={() => { setBackendInput(backendUrl); ngrokDialog.current?.showModal(); }}><Database size={15} aria-hidden="true"/> {backendUrl ? 'Backend conectado' : 'Conectar ngrok'}</button>
         <button className="button secondary" onClick={() => { presentationDialog.current?.showModal(); setPresentationOpen(true); }}><Presentation size={16} aria-hidden="true"/> Presentación</button>
-        <span className={`mode ${mode}`}><i/> {mode === 'showcase' ? (run?.used_llm ? 'OpenRouter conectado' : 'En navegador (Vercel)') : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span>
+        <span className={`mode ${mode}`}><i/> {backendUrl ? (mode === 'live' ? 'Backend local + IA' : mode === 'offline' ? 'Backend desconectado' : 'Backend local (ngrok)') : mode === 'showcase' ? (run?.used_llm ? 'OpenRouter conectado' : 'En navegador (Vercel)') : mode === 'demo' ? 'Modo de demostración local' : mode === 'live' ? 'Modo de IA en vivo' : mode === 'offline' ? 'Servidor desconectado' : 'Conectando'}</span>
         <button className="icon-button help" title="Cómo usar" onClick={() => setNotice('Conecta tus nodos, sube un PDF o Excel en Base de conocimiento, guarda tu flujo si lo editas y conversa en el chat simulado tipo WhatsApp.')}><CircleHelp size={19}/></button>
       </div>
     </header>
+
+    <dialog ref={ngrokDialog} className="doc-dialog" aria-labelledby="ngrok-title">
+      <div className="doc-dialog-body">
+        <header className="doc-dialog-head">
+          <div>
+            <span className="section-kicker">BACKEND LOCAL</span>
+            <h2 id="ngrok-title">Conectar backend por ngrok</h2>
+          </div>
+          <button className="icon-button" aria-label="Cerrar" onClick={() => ngrokDialog.current?.close()}><X size={20}/></button>
+        </header>
+        <form
+          className="doc-dialog-content"
+          onSubmit={e => {
+            e.preventDefault();
+            const clean = backendInput.trim().replace(/\/+$/, '');
+            try {
+              if (clean) window.localStorage.setItem(BACKEND_URL_KEY, clean);
+              else window.localStorage.removeItem(BACKEND_URL_KEY);
+            } catch { /* ignore */ }
+            setBackendUrl(clean);
+            ngrokDialog.current?.close();
+            setNotice(clean ? `Conectando con ${clean}…` : 'Volviste al modo navegador.');
+          }}
+        >
+          <p className="field-help" style={{ margin: 0, fontSize: '12px' }}>
+            Pega la URL HTTPS que te da ngrok (ejemplo: <code>https://abc123.ngrok-free.app</code>) mientras corres el backend local en el puerto 8000. Déjalo vacío para volver al modo navegador.
+          </p>
+          <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155' }}>
+            URL del backend (ngrok o localhost)
+            <input
+              type="url"
+              value={backendInput}
+              onChange={e => setBackendInput(e.target.value)}
+              placeholder="https://tu-tunel.ngrok-free.app"
+              style={{ width: '100%', marginTop: '8px', padding: '10px 12px', borderRadius: '10px', border: '1px solid #dce3ec' }}
+            />
+          </label>
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+            {backendUrl && (
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => {
+                  setBackendInput('');
+                  try { window.localStorage.removeItem(BACKEND_URL_KEY); } catch { /* ignore */ }
+                  setBackendUrl('');
+                  ngrokDialog.current?.close();
+                  setNotice('Desconectado del backend; usando modo navegador.');
+                }}
+              >
+                Usar modo navegador
+              </button>
+            )}
+            <button type="submit" className="button primary">Guardar y conectar</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
 
     <dialog ref={presentationDialog} className="presentation-dialog" aria-labelledby="presentation-title" onClose={() => setPresentationOpen(false)}>
       <div className="presentation-content">

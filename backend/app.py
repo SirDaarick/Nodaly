@@ -1,17 +1,26 @@
-import hashlib, io, json, os, re, sqlite3, uuid
+import csv, hashlib, io, json, os, re, sqlite3, uuid
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.request import Request, urlopen
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request as FastAPIRequest
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 DB = os.environ.get('NODALY_DB', str(Path(__file__).with_name('nodaly.sqlite3')))
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_credentials=False,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: FastAPIRequest, exc: RequestValidationError):
@@ -36,7 +45,9 @@ def db():
     c.commit()
     return c
 
-def mode(): return 'live' if all(os.environ.get(k) for k in ('NODALY_AI_URL','NODALY_AI_KEY','NODALY_AI_MODEL')) else 'demo'
+def mode():
+    if os.environ.get('OPENROUTER_API_KEY'): return 'live'
+    return 'live' if all(os.environ.get(k) for k in ('NODALY_AI_URL','NODALY_AI_KEY','NODALY_AI_MODEL')) else 'demo'
 def fail(msg): raise HTTPException(422,detail=msg)
 
 def node(kind,x,config=None): return {'id':kind,'type':kind,'position':{'x':x,'y':80 if kind!='knowledge' else 250},'data':{'label':{'message':'Recibir mensaje','knowledge':'Base de conocimiento','agent':'Agente de IA','reply':'Respuesta','register':'Registrar información','query':'Consultar registros','report':'Generar informe'}[kind],'config':config or {}}}
@@ -53,7 +64,7 @@ TEMPLATES=[
 class Graph(BaseModel):
     name:str='Flujo de trabajo'; nodes:list[dict]; edges:list[dict]
 class Run(BaseModel):
-    nodes:list[dict]; edges:list[dict]; message:str=Field(max_length=12000); run_id:str=Field(min_length=1,max_length=100); confirm:bool=False
+    nodes:list[dict]; edges:list[dict]; message:str=Field(max_length=12000); run_id:str=Field(min_length=1,max_length=100); confirm:bool=False; history:list[dict]=[]
 
 @app.get('/api/health')
 def health(): return {'status':'ok','mode':mode()}
@@ -70,17 +81,45 @@ def save_workflow(wid:str,g:Graph):
 @app.get('/api/documents')
 def documents():
     with db() as c: return [dict(id=r['id'],name=r['name'],text_length=sum(len(p) for p in json.loads(r['pages']))) for r in c.execute('SELECT * FROM documents ORDER BY name')]
+@app.get('/api/documents/{did}')
+def get_document(did:str):
+    with db() as c:
+        row=c.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone()
+        if not row: raise HTTPException(404,'Documento no encontrado')
+        pages=json.loads(row['pages'])
+        kind='pdf' if row['name'].lower().endswith('.pdf') else 'excel' if row['name'].lower().endswith(('.xlsx','.csv')) else 'text'
+        return {'id':row['id'],'name':row['name'],'kind':kind,'text_length':sum(len(p) for p in pages),'sections':[{'label':f"{row['name']}, pág. {i+1}" if kind=='pdf' else row['name'],**({'page':i+1} if kind=='pdf' else {}), 'text':p} for i,p in enumerate(pages)]}
 @app.post('/api/documents')
 async def upload(file:UploadFile=File(...)):
     name=Path((file.filename or '').replace('\\','/')).name
-    if len(name)>200 or Path(name).suffix.lower() not in ('.txt','.pdf'): fail('Solo se admiten archivos PDF y TXT')
+    suffix=Path(name).suffix.lower()
+    if len(name)>200 or suffix not in ('.txt','.pdf','.xlsx','.csv'): fail('Solo se admiten archivos PDF, Excel (.xlsx), CSV y TXT')
     data=await file.read(5*1024*1024+1)
     if len(data)>5*1024*1024: fail('El archivo supera los 5 MB')
     try:
-        if name.lower().endswith('.txt'): pages=[data.decode('utf-8-sig')]
+        if suffix=='.txt': pages=[data.decode('utf-8-sig')]
+        elif suffix=='.csv':
+            text_data=data.decode('utf-8-sig')
+            rows=list(csv.reader(io.StringIO(text_data)))
+            headers=rows[0] if rows else []
+            formatted=[' | '.join(f'{headers[i] if i<len(headers) else f"Col{i+1}"}: {cell}' for i,cell in enumerate(r) if cell.strip()) for r in rows[1:]] if len(rows)>1 else [', '.join(r) for r in rows]
+            pages=['\n'.join(line for line in formatted if line)]
+        elif suffix=='.xlsx':
+            wb=load_workbook(io.BytesIO(data),read_only=True,data_only=True)
+            pages=[]
+            for sheet_name in wb.sheetnames:
+                ws=wb[sheet_name]
+                rows=list(ws.iter_rows(values_only=True))
+                if not rows: continue
+                headers=[str(h or f'Col{i+1}').strip() for i,h in enumerate(rows[0])]
+                lines=[]
+                for r in rows[1:]:
+                    pairs=[f'{headers[i]}: {str(v).strip()}' for i,v in enumerate(r) if i<len(headers) and v is not None and str(v).strip()!='']
+                    if pairs: lines.append(' | '.join(pairs))
+                if lines: pages.append(f'[Hoja: {sheet_name}]\n'+'\n'.join(lines))
         else:
             reader=PdfReader(io.BytesIO(data)); pages=[page.extract_text() or '' for page in reader.pages]
-    except Exception: fail('No se pudo leer el archivo; usa un TXT UTF-8 válido o un PDF con texto')
+    except Exception: fail('No se pudo leer el archivo; usa un PDF, Excel (.xlsx), CSV o TXT válido')
     if not any(p.strip() for p in pages): fail('El archivo no contiene texto extraíble; no se admiten PDF escaneados')
     if sum(map(len,pages))>24000: fail('El documento supera los 24000 caracteres')
     ident=str(uuid.uuid4())
@@ -212,13 +251,27 @@ def report(rows,cfg):
         v=Decimal(r['amount']); total+=v; cat=r['category']; g=groups.setdefault(cat,{'category':cat,'total':Decimal('0'),'count':0}); g['total']+=v; g['count']+=1
     return {'title':cfg.get('title','Informe de gastos'), 'total':f'{total:.2f}','count':len(rows),'groups':[dict(g,total=f"{g['total']:.2f}") for g in groups.values()] if cfg.get('group_by','category')=='category' else []}
 
-def live_answer(message,sources,instructions):
+def live_answer(message,sources,instructions,model_override='',history=None):
+    or_key=os.environ.get('OPENROUTER_API_KEY')
+    ai_url=os.environ.get('NODALY_AI_URL') or ('https://openrouter.ai/api/v1/chat/completions' if or_key else '')
+    ai_key=os.environ.get('NODALY_AI_KEY') or or_key or ''
+    ai_model=model_override or os.environ.get('NODALY_AI_MODEL') or os.environ.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
     prompt='Responde siempre en español y solo con estas fuentes. Si falta información, indícalo. Cita los nombres de las fuentes.\n'+ '\n'.join(f'[{name}{" página "+str(page) if page else ""}] {text}' for name,page,text in sources)
-    payload=json.dumps({'model':os.environ['NODALY_AI_MODEL'],'messages':[{'role':'system','content':prompt+'\n'+instructions},{'role':'user','content':message}]}).encode()
-    req=Request(os.environ['NODALY_AI_URL'],data=payload,headers={'Authorization':'Bearer '+os.environ['NODALY_AI_KEY'],'Content-Type':'application/json'},method='POST')
+    msgs=[{'role':'system','content':prompt+'\n'+instructions}]
+    if history:
+        for h in history[-8:]:
+            if isinstance(h,dict) and h.get('role') in ('user','assistant') and h.get('content'):
+                msgs.append({'role':h['role'],'content':str(h['content'])})
+    msgs.append({'role':'user','content':message})
+    payload=json.dumps({'model':ai_model,'messages':msgs}).encode()
+    headers={'Authorization':'Bearer '+ai_key,'Content-Type':'application/json'}
+    if 'openrouter.ai' in ai_url:
+        headers['HTTP-Referer']='https://nodaly.vercel.app'
+        headers['X-Title']='Nodaly Flow Studio'
+    req=Request(ai_url,data=payload,headers=headers,method='POST')
     try:
         with urlopen(req,timeout=30) as resp: result=json.load(resp)
-        return result['choices'][0]['message']['content']
+        return result['choices'][0]['message']['content'], ai_model
     except Exception: raise ValueError('Falló la solicitud al proveedor de IA configurado')
 
 @app.post('/api/run')
@@ -235,7 +288,11 @@ def run(body:Run):
                 for context_id in contexts[ident]: steps.append({'node_id':context_id,'status':'completed','output':{'sources':len(sources)}})
                 if kind=='answer':
                     output,used=answer(body.message,sources)
-                    if mode()=='live': output=live_answer(body.message,sources,str(cfg.get('instructions',''))); used=[{'name':name,**({'page':p} if p else {})} for name,p,t in sources if t.strip()]
+                    if mode()=='live':
+                        output,used_model=live_answer(body.message,sources,str(cfg.get('instructions','')),str(cfg.get('model','')),body.history)
+                        used=[{'name':name,**({'page':p} if p else {})} for name,p,t in sources if t.strip()]
+                        result['used_llm']=True
+                        result['llm_model']=used_model
                     result['sources']=used
                 elif kind=='extract': output=extract(body.message)
                 else: output=filters(body.message)
