@@ -68,4 +68,26 @@ describe('browser showcase', () => {
       .toMatchObject({ status: 'error' });
     await expect(api('/documents', { method: 'POST', body: '{}' })).rejects.toThrow();
   });
+
+  it('runs differentiated FEPI workflows with export_file and query-to-agent table lookup', async () => {
+    const api = createDemo();
+    const workflows = await api('/workflows') as { id: string; nodes: unknown[]; edges: unknown[] }[];
+    const evogym = workflows.find((w) => w.id === 'fepi-3-reportes-evogym')!;
+    const evoRes = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...evogym, message: 'Muestra todos los gastos', run_id: 'evo-1', confirm: false }),
+    }) as { status: string; export_file?: { format: string; rows: unknown[] }; reply: string };
+    expect(evoRes.status).toBe('completed');
+    expect(evoRes.export_file?.format).toBe('xlsx');
+    expect(evoRes.export_file?.rows).toHaveLength(2);
+    expect(evoRes.reply).toContain('Corte administrativo EvoGym');
+
+    const fernando = workflows.find((w) => w.id === 'fepi-4-soporte-cursos')!;
+    const ferRes = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...fernando, message: 'Almuerzo ficticio', run_id: 'fer-1', confirm: false }),
+    }) as { status: string; reply: string; sources?: { name: string }[] };
+    expect(ferRes.status).toBe('completed');
+    expect(ferRes.sources?.some((s) => s.name === 'Registros guardados')).toBe(true);
+  });
 });

@@ -1,5 +1,5 @@
 import type { NodeChange } from '@xyflow/react';
-export type Kind = 'message' | 'knowledge' | 'agent' | 'reply' | 'register' | 'query' | 'report';
+export type Kind = 'message' | 'knowledge' | 'agent' | 'reply' | 'register' | 'query' | 'report' | 'export';
 export type Config = Record<string, unknown>;
 export type FlowNode = { id: string; type: Kind; position: { x: number; y: number }; data: { label: string; config: Config } };
 export type FlowEdge = { id: string; source: string; target: string; sourceHandle?: string | null; targetHandle?: string | null };
@@ -11,6 +11,7 @@ export const kinds: { type: Kind; label: string; description: string; icon: stri
   { type: 'register', label: 'Registrar información', description: 'Guarda un gasto', icon: '▣', color: 'amber' },
   { type: 'query', label: 'Consultar registros', description: 'Busca gastos guardados', icon: '⌕', color: 'blue' },
   { type: 'report', label: 'Generar informe', description: 'Resume los resultados', icon: '▥', color: 'rose' },
+  { type: 'export', label: 'Exportar archivo', description: 'Descarga Excel o PDF', icon: '⇩', color: 'emerald' },
 ];
 export function defaultConfig(type: Kind): Config {
   switch (type) {
@@ -21,6 +22,7 @@ export function defaultConfig(type: Kind): Config {
     case 'register': return { collection: 'expenses' };
     case 'query': return { collection: 'expenses', period: 'all', category: '' };
     case 'report': return { amount_field: 'amount', group_by: 'category', title: 'Informe de gastos' };
+    case 'export': return { format: 'xlsx', filename: 'reporte-nodaly', title: 'Reporte Nodaly' };
   }
 }
 
@@ -42,13 +44,13 @@ export function updateDimensions(current: Record<string, {width: number; height:
 const labels: Record<string, string> = {
   'Receive message': 'Recibir mensaje', 'Knowledge base': 'Base de conocimiento', 'AI Agent': 'Agente de IA',
   'Reply': 'Responder', 'Register information': 'Registrar información', 'Query records': 'Consultar registros',
-  'Generate report': 'Generar informe', 'Document assistant': 'Asistente de documentos',
+  'Generate report': 'Generar informe', 'Export file': 'Exportar archivo', 'Document assistant': 'Asistente de documentos',
   'Expense registration': 'Registro de gastos', 'Expense report': 'Informe de gastos',
   'Expenses': 'Gastos', 'Pasted text': 'Texto pegado', 'Untitled workflow': 'Flujo sin título',
 };
 const statuses: Record<string, string> = { completed: 'Completado', error: 'Error', awaiting_confirmation: 'Pendiente de confirmación' };
 const categories: Record<string, string> = { food: 'Alimentación', transport: 'Transporte', supplies: 'Insumos', utilities: 'Servicios', other: 'Otros' };
-const fields: Record<string, string> = { date: 'Fecha', concept: 'Concepto', category: 'Categoría', amount: 'Importe', sources: 'Fuentes', count: 'Cantidad', total: 'Total', groups: 'Grupos', title: 'Título', period: 'Período', id: 'Identificador' };
+const fields: Record<string, string> = { date: 'Fecha', concept: 'Concepto', category: 'Categoría', amount: 'Importe', sources: 'Fuentes', count: 'Cantidad', total: 'Total', groups: 'Grupos', title: 'Título', period: 'Período', id: 'Identificador', format: 'Formato', filename: 'Archivo', rows: 'Filas' };
 const periods: Record<string, string> = { all: 'Todo el tiempo', today: 'Hoy', week: 'Esta semana', month: 'Este mes' };
 export const displayLabel = (value: string) => labels[value] ?? value;
 export const displayStatus = (value: string) => statuses[value] ?? value;

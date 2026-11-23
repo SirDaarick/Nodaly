@@ -157,5 +157,22 @@ class API(unittest.TestCase):
     def test_report_and_missing_info(self):
         t=self.c.get('/api/templates').json()[2]; r=self.c.post('/api/run',json={**t,'run_id':'report-test','confirm':False}).json(); self.assertEqual(r['status'],'completed'); self.assertIn('total',r['report'])
         t=self.c.get('/api/templates').json()[0]; r=self.c.post('/api/run',json={**t,'message':'What is the secret of zebras?','run_id':'missing','confirm':False}).json(); self.assertIn('información',r['reply'].lower())
+    def test_export_node_and_query_to_agent_fepi_flows(self):
+        flows={w['id']:w for w in self.c.get('/api/workflows').json()}
+        self.assertIn('fepi-3-reportes-evogym',flows)
+        evogym=flows['fepi-3-reportes-evogym']
+        res=self.c.post('/api/run',json={**evogym,'message':'Muestra todos los gastos','run_id':'evo-export','confirm':False}).json()
+        self.assertEqual(res['status'],'completed')
+        self.assertEqual(res['export_file']['format'],'xlsx')
+        self.assertEqual(len(res['export_file']['rows']),2)
+        self.assertIn('Corte administrativo EvoGym',res['reply'])
+
+        fernando=flows['fepi-4-soporte-cursos']
+        res_f=self.c.post('/api/run',json={**fernando,'message':'Almuerzo ficticio','run_id':'fer-table','confirm':False}).json()
+        self.assertEqual(res_f['status'],'completed')
+        self.assertEqual(res_f['sources'][0]['name'],'Registros guardados')
+
+        bad=dict(evogym,nodes=[{**n,'data':{**n['data'],'config':{**n['data']['config'],'format':'exe'}}} if n['type']=='export' else n for n in evogym['nodes']])
+        self.assertEqual(self.c.post('/api/run',json={**bad,'message':'Muestra todos los gastos','run_id':'bad-export','confirm':False}).status_code,422)
 
 if __name__ == '__main__': unittest.main()

@@ -89,6 +89,14 @@ def db():
             template('fepi-4-soporte-cursos','4. Soporte y Cursos en Línea (Fernando)','Clasifica solicitudes de soporte y responde dudas de la plataforma.',['message','knowledge','agent','reply'],{'knowledge':{'text':'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.','document_ids':['sample-soporte-pdf']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.'},'reply':{'template':''}},'¿Cómo descargo mi constancia si ya terminé el curso?'),
         ]
         c.executemany('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_v2])
+    if c.execute("INSERT OR IGNORE INTO metadata VALUES('seeded_fepi_v3')").rowcount:
+        fepi_v3=[
+            template('fepi-1-cotizaciones','1. Cotizador Mesas de Dulces (Sandra)','Cotiza mesas de dulces y genera copia descargable en PDF.',['message','knowledge','agent','export','reply'],{'knowledge':{'text':'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.','document_ids':['sample-sandra-xlsx']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que puede descargar su copia en PDF.'},'export':{'format':'pdf','filename':'cotizacion-sandra','title':'Cotización — Mesas de Dulces Sandra'},'reply':{'template':''}},'Soy Laura, cotízame 1 mesa clásica + exhibidores + envío'),
+            template('fepi-2-gastos-obra','2. Control de Obra y Gastos (Julio)','Registra gastos de obra en tabla SQLite y exporta comprobante en Excel.',['message','agent','register','export','reply'],{'agent':{'mode':'extract','instructions':'Extrae concepto, categoría y monto de gastos de obra o administración.'},'register':{'collection':'expenses'},'export':{'format':'xlsx','filename':'gasto-obra-julio','title':'Comprobante de Gasto de Obra'},'reply':{'template':''}},'Hoy gasté 850 en soldadura.'),
+            template('fepi-3-reportes-evogym','3. Cortes y Reportes EvoGym (Gimnasio)','Consulta los registros guardados, calcula totales y exporta el corte a Excel.',['message','agent','query','report','export','reply'],{'agent':{'mode':'query','instructions':'Interpreta el período y categoría para el corte administrativo del gimnasio.'},'query':{'collection':'expenses','period':'all','category':''},'report':{'amount_field':'amount','group_by':'category','title':'Corte administrativo EvoGym'},'export':{'format':'xlsx','filename':'corte-evogym','title':'Corte administrativo EvoGym'},'reply':{'template':''}},'Muestra todos los gastos'),
+            template('fepi-4-soporte-cursos','4. Soporte y Consulta de Registros (Fernando)','Cruza la guía PDF con la tabla de registros guardados usando el Agente IA.',['message','query','knowledge','agent','reply'],{'query':{'collection':'expenses','period':'all','category':''},'knowledge':{'text':'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.','document_ids':['sample-soporte-pdf']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Atiende como mesa de soporte y asistente administrativo. Tienes acceso tanto a la guía de soporte como a la tabla de registros guardados. Responde dudas de la plataforma o preguntas sobre los registros guardados con pasos y datos claros.'},'reply':{'template':''}},'¿Qué gastos tenemos registrados en la tabla?'),
+        ]
+        c.executemany('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_v3])
     c.commit()
     return c
 
@@ -97,7 +105,7 @@ def mode():
     return 'live' if all(os.environ.get(k) for k in ('NODALY_AI_URL','NODALY_AI_KEY','NODALY_AI_MODEL')) else 'demo'
 def fail(msg): raise HTTPException(422,detail=msg)
 
-def node(kind,x,config=None): return {'id':kind,'type':kind,'position':{'x':x,'y':80 if kind!='knowledge' else 250},'data':{'label':{'message':'Recibir mensaje','knowledge':'Base de conocimiento','agent':'Agente de IA','reply':'Respuesta','register':'Registrar información','query':'Consultar registros','report':'Generar informe'}[kind],'config':config or {}}}
+def node(kind,x,config=None): return {'id':kind,'type':kind,'position':{'x':x,'y':80 if kind!='knowledge' else 250},'data':{'label':{'message':'Recibir mensaje','knowledge':'Base de conocimiento','agent':'Agente de IA','reply':'Respuesta','register':'Registrar información','query':'Consultar registros','report':'Generar informe','export':'Exportar archivo'}[kind],'config':config or {}}}
 def template(tid,name,description,kinds,configs,message):
     nodes=[node(k,80+i*220,configs.get(k)) for i,k in enumerate(kinds)]
     actions=[k for k in kinds if k!='knowledge']; edges=[{'id':f'{a}-{b}','source':a,'target':b} for a,b in zip(actions,actions[1:])]
@@ -183,11 +191,12 @@ def records():
 
 def validate(nodes,edges):
     if not nodes or len(nodes)>30 or len(edges)>60: fail('El grafo debe contener entre 1 y 30 nodos y hasta 60 conexiones')
-    if any(not isinstance(n,dict) or not isinstance(n.get('id'),str) or not n['id'] or n.get('type') not in ('message','knowledge','agent','reply','register','query','report') or not isinstance(n.get('data',{}),dict) or not isinstance(n.get('data',{}).get('config',{}),dict) for n in nodes): fail('Nodo no válido')
+    if any(not isinstance(n,dict) or not isinstance(n.get('id'),str) or not n['id'] or n.get('type') not in ('message','knowledge','agent','reply','register','query','report','export') or not isinstance(n.get('data',{}),dict) or not isinstance(n.get('data',{}).get('config',{}),dict) for n in nodes): fail('Nodo no válido')
     for n in nodes:
         typ=n['type']; cfg=n.get('data',{}).get('config',{})
-        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000}.items():
+        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000,'filename':120}.items():
             if key in cfg and (not isinstance(cfg[key],str) or len(cfg[key])>limit): fail('Configuración no válida: '+key)
+        if typ=='export' and cfg.get('format','xlsx') not in ('xlsx','pdf'): fail('Formato de exportación no válido')
         if typ=='knowledge' and (not isinstance(cfg.get('document_ids',[]),list) or len(cfg.get('document_ids',[]))>3 or any(not isinstance(d,str) or len(d)>100 for d in cfg.get('document_ids',[]))): fail('La base de conocimiento admite hasta tres documentos')
         if typ=='register' and cfg.get('field_map',{}) != {}: fail('No se admiten asignaciones de campos personalizadas')
     by={n['id']:n for n in nodes}
@@ -325,7 +334,7 @@ def live_answer(message,sources,instructions,model_override='',history=None):
 def run(body:Run):
     by,order,contexts=validate(body.nodes,body.edges)
     fingerprint=hashlib.sha256(json.dumps({'nodes':body.nodes,'edges':body.edges,'message':body.message},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-    pending=None; steps=[]; previous=body.message; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
+    pending=None; steps=[]; previous=body.message; last_rows=None; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
     try:
         for ident in order:
             n=by[ident]; typ=n['type']; cfg=n.get('data',{}).get('config',{}); output=previous
@@ -334,6 +343,9 @@ def run(body:Run):
                 kind=cfg['mode']; sources=knowledge(contexts[ident],by)
                 for context_id in contexts[ident]: steps.append({'node_id':context_id,'status':'completed','output':{'sources':len(sources)}})
                 if kind=='answer':
+                    if isinstance(previous,list):
+                        table_lines=[f"Fecha: {r.get('date','')} | Concepto: {r.get('concept','')} | Categoría: {r.get('category','')} | Importe: ${r.get('amount','')}" for r in previous if isinstance(r,dict)]
+                        sources.append(('Registros guardados',None,'[Tabla: Registros guardados]\n'+('\n'.join(table_lines) if table_lines else 'No hay registros guardados en este período.')))
                     output,used=answer(body.message,sources)
                     if mode()=='live':
                         output,used_model=live_answer(body.message,sources,str(cfg.get('instructions','')),str(cfg.get('model','')),body.history)
@@ -355,8 +367,29 @@ def run(body:Run):
                     if not body.confirm:
                         result['status']='awaiting_confirmation'; steps.append({'node_id':ident,'status':'awaiting_confirmation','output':output}); return result
                     pending=output
-            elif typ=='query': output=query_records(cfg,previous)
+            elif typ=='query': output=query_records(cfg,previous); last_rows=output
             elif typ=='report': output=report(previous,cfg); result['report']=output
+            elif typ=='export':
+                fmt=cfg.get('format','xlsx'); fname=(cfg.get('filename') or 'reporte-nodaly').strip() or 'reporte-nodaly'
+                if isinstance(previous,list):
+                    exp_rows=[{'Fecha':r.get('date',''),'Concepto':r.get('concept',''),'Categoría':r.get('category',''),'Importe':r.get('amount','')} for r in previous if isinstance(r,dict)]
+                    exp_title=cfg.get('title') or 'Tabla de registros'
+                    exp_summary=f"Se exportaron {len(exp_rows)} registros."
+                elif last_rows is not None and isinstance(previous,dict) and 'groups' in previous:
+                    exp_rows=[{'Fecha':r.get('date',''),'Concepto':r.get('concept',''),'Categoría':r.get('category',''),'Importe':r.get('amount','')} for r in last_rows if isinstance(r,dict)]
+                    exp_title=previous.get('title') or cfg.get('title') or 'Informe de gastos'
+                    exp_summary=f"{exp_title}: {previous['count']} registros, total ${previous['total']}."
+                elif isinstance(previous,dict) and 'amount' in previous:
+                    exp_rows=[{'Fecha':previous.get('date',''),'Concepto':previous.get('concept',''),'Categoría':previous.get('category',''),'Importe':previous.get('amount','')}]
+                    exp_title=cfg.get('title') or 'Comprobante de registro'
+                    exp_summary=f"Gasto registrado: {previous['concept']}, importe ${previous['amount']}, fecha {previous['date']}."
+                else:
+                    exp_rows=[{'Fecha':date.today().isoformat(),'Pregunta':body.message,'Respuesta':str(previous)}]
+                    exp_title=cfg.get('title') or 'Documento generado'
+                    exp_summary=str(previous)
+                result['export_file']={'format':fmt,'filename':fname,'title':exp_title,'rows':exp_rows,'summary':exp_summary}
+                steps.append({'node_id':ident,'status':'completed','output':{'format':fmt,'filename':fname,'rows':len(exp_rows)}})
+                continue
             elif typ=='reply':
                 template=cfg.get('template','')
                 if not isinstance(template,str) or len(template)>4000: raise ValueError('Plantilla de respuesta no válida')

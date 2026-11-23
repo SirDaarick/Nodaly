@@ -25,6 +25,7 @@ type Run = {
   preview?: Record<string, unknown>;
   sources?: { name: string; page?: number; sheet?: string }[];
   report?: { title?: string; total: string; count: number; groups: { category: string; total: string; count: number }[] };
+  export_file?: { format: 'xlsx' | 'pdf'; filename: string; title: string; rows: Record<string, string | number>[]; summary: string };
 };
 type RecordItem = { id: string; date: string; concept: string; category: string; amount: string };
 type ChatEntry = {
@@ -372,9 +373,9 @@ function App() {
   const quickPrompts = lowerFlowName.includes('dulces') || lowerFlowName.includes('sandra')
     ? ['Hola, quiero cotizar una mesa clásica con exhibidores', 'Soy Laura, cotízame 1 mesa clásica + exhibidores + envío', 'Soy Carlos, mesa premium + 20 bolsas personalizadas']
     : lowerFlowName.includes('evogym') || lowerFlowName.includes('gimnasio')
-      ? ['¿Cuánto ingresó hoy en total?', '¿Cuántas suscripciones se cobraron?', '¿Cuál es el corte neto del día?']
+      ? ['Muestra todos los gastos', 'Gastos de hoy en insumos', 'Corte de alimentación']
       : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
-        ? ['¿Cómo descargo mi constancia?', 'Olvidé mi contraseña, ¿qué hago?', 'Tengo un problema de pago empresarial']
+        ? ['¿Qué gastos tenemos registrados en la tabla?', '¿Cómo descargo mi constancia?', 'Tengo un problema de pago empresarial']
         : activeAgentMode === 'extract'
           ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
           : activeAgentMode === 'query'
@@ -596,7 +597,28 @@ function App() {
                         {item.sender === 'bot' && item.run && !item.isError && (
                           <div className="wa-badges">
                             {item.run.used_llm && <span className="wa-llm-badge"><Sparkles size={10}/> OpenRouter</span>}
-                            {(item.isQuote || (item.run.preview && item.run.status === 'completed')) && (
+                            {item.run.export_file && (
+                              <button
+                                type="button"
+                                className="wa-doc-btn"
+                                onClick={() => {
+                                  const ef = item.run!.export_file!;
+                                  if (ef.format === 'xlsx') {
+                                    exportRowsToExcel(ef.rows, ef.filename, 'Datos');
+                                  } else {
+                                    exportPrintPdf(
+                                      ef.title || name,
+                                      `Generado a las ${item.time} desde ${name}`,
+                                      [{ label: 'Flujo', value: name }, { label: 'Archivo', value: `${ef.filename}.pdf` }],
+                                      ef.summary || item.text,
+                                    );
+                                  }
+                                }}
+                              >
+                                <Download size={11}/> {item.run.export_file.format === 'xlsx' ? `Descargar Excel (${item.run.export_file.filename}.xlsx)` : `Descargar PDF (${item.run.export_file.filename}.pdf)`}
+                              </button>
+                            )}
+                            {!item.run.export_file && (item.isQuote || (item.run.preview && item.run.status === 'completed')) && (
                               <button
                                 type="button"
                                 className="wa-doc-btn"
@@ -842,6 +864,7 @@ function Settings({node, docs, update, upload, inspectDoc, removeDoc, busy}: {no
   if(node.type==='reply') return <label>Plantilla de respuesta<textarea rows={5} value={value('template')} onChange={e=>update('template',e.target.value)} placeholder="Deja este campo vacío para usar el resultado anterior."/><span className="field-help">Deja este campo vacío para usar el resultado del paso anterior.</span></label>;
   if(node.type==='register') return <div className="hint"><strong>Colección: Gastos</strong><p>Se muestra una vista previa en el chat antes de guardar.</p></div>;
   if(node.type==='query') return <><label>Período<select value={value('period')} onChange={e=>update('period',e.target.value)}><option value="all">Todo el tiempo</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label><label>Categoría<select value={value('category')} onChange={e=>update('category',e.target.value)}><option value="">Todas las categorías</option>{['food','transport','supplies','utilities','other'].map(category=><option key={category} value={category}>{displayCategory(category)}</option>)}</select></label><p className="field-help">El período o la categoría seleccionados reemplazan los filtros extraídos del mensaje.</p></>;
+  if(node.type==='export') return <><label>Formato de exportación<select value={value('format') || 'xlsx'} onChange={e=>update('format',e.target.value)}><option value="xlsx">Excel (.xlsx)</option><option value="pdf">Documento PDF</option></select></label><label>Nombre del archivo<input value={value('filename')} onChange={e=>update('filename',e.target.value)} placeholder="reporte-nodaly"/></label><label>Título del documento<input value={value('title')} onChange={e=>update('title',e.target.value)} placeholder="Reporte Nodaly"/></label><div className="hint"><strong>Descarga directa en el chat</strong><p>Al ejecutarse este nodo, aparece un botón en el simulador de WhatsApp para descargar el archivo con los datos del paso anterior.</p></div></>;
   return <><label>Título del informe<input value={displayLabel(value('title'))} onChange={e=>update('title',e.target.value)}/></label><label>Agrupar por<select value={value('group_by')} onChange={e=>update('group_by',e.target.value)}><option value="category">Categoría</option><option value="none">Sin agrupar</option></select></label><div className="hint"><strong>Campo de importe: importe</strong><p>Los totales se calculan a partir de los gastos guardados.</p></div></>;
 }
 

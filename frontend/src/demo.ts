@@ -24,7 +24,7 @@ type RunRequest = {
 };
 type SavedWorkflow = { id: string; name: string; nodes: FlowNode[]; edges: FlowEdge[] };
 
-const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v1';
+const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v2';
 const DOCUMENTS_KEY = 'nodaly.showcase.documents.v1';
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -89,133 +89,170 @@ async function tryOpenRouter(
 }
 
 function createSampleWorkflows(): SavedWorkflow[] {
-  const [assistant, capture, report] = templates as { id: string; nodes: FlowNode[]; edges: FlowEdge[] }[];
-  const clone = <T,>(v: T): T => structuredClone(v);
-
   const fepi1: SavedWorkflow = {
     id: 'fepi-1-cotizaciones',
     name: '1. Cotizador Mesas de Dulces (Sandra)',
-    nodes: clone(assistant.nodes).map((n) =>
-      n.type === 'message'
-        ? { ...n, data: { ...n.data, label: 'Instagram / WhatsApp' } }
-        : n.type === 'knowledge'
-          ? {
-              ...n,
-              data: {
-                label: 'Catálogo Sandra (Excel)',
-                config: {
-                  text: 'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.',
-                  document_ids: ['sample-sandra-xlsx'],
-                },
-              },
-            }
-          : n.type === 'agent'
-            ? {
-                ...n,
-                data: {
-                  label: 'Cotizador IA',
-                  config: {
-                    mode: 'answer',
-                    model: 'openai/gpt-4o-mini',
-                    instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que se generó una copia para el cliente y un reporte para Sandra.',
-                  },
-                },
-              }
-            : { ...n, data: { ...n.data, label: 'Enviar cotización' } },
-    ),
-    edges: clone(assistant.edges),
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Instagram / WhatsApp', config: {} } },
+      {
+        id: 'knowledge',
+        type: 'knowledge',
+        position: { x: 300, y: 250 },
+        data: {
+          label: 'Catálogo Sandra (Excel)',
+          config: {
+            text: 'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.',
+            document_ids: ['sample-sandra-xlsx'],
+          },
+        },
+      },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 300, y: 80 },
+        data: {
+          label: 'Cotizador IA',
+          config: {
+            mode: 'answer',
+            model: 'openai/gpt-4o-mini',
+            instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que puede descargar su copia en PDF.',
+          },
+        },
+      },
+      {
+        id: 'export',
+        type: 'export',
+        position: { x: 520, y: 80 },
+        data: {
+          label: 'Exportar cotización (PDF)',
+          config: { format: 'pdf', filename: 'cotizacion-sandra', title: 'Cotización — Mesas de Dulces Sandra' },
+        },
+      },
+      { id: 'reply', type: 'reply', position: { x: 740, y: 80 }, data: { label: 'Enviar cotización', config: { template: '' } } },
+    ],
+    edges: [
+      { id: 'message-agent', source: 'message', target: 'agent' },
+      { id: 'knowledge-agent', source: 'knowledge', target: 'agent' },
+      { id: 'agent-export', source: 'agent', target: 'export' },
+      { id: 'export-reply', source: 'export', target: 'reply' },
+    ],
   };
 
   const fepi2: SavedWorkflow = {
     id: 'fepi-2-gastos-obra',
     name: '2. Control de Obra y Gastos (Julio)',
-    nodes: clone(capture.nodes).map((n) =>
-      n.type === 'message'
-        ? { ...n, data: { ...n.data, label: 'WhatsApp Residente' } }
-        : n.type === 'agent'
-          ? {
-              ...n,
-              data: {
-                label: 'Extractor de Gastos',
-                config: {
-                  mode: 'extract',
-                  instructions: 'Extrae concepto, categoría y monto de gastos de obra, acero o administración.',
-                },
-              },
-            }
-          : n.type === 'register'
-            ? { ...n, data: { ...n.data, label: 'Bitácora de Obra' } }
-            : { ...n, data: { ...n.data, label: 'Confirmar registro' } },
-    ),
-    edges: clone(capture.edges),
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'WhatsApp Residente', config: {} } },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 300, y: 80 },
+        data: {
+          label: 'Extractor de Gastos',
+          config: {
+            mode: 'extract',
+            instructions: 'Extrae concepto, categoría y monto de gastos de obra, acero o administración.',
+          },
+        },
+      },
+      { id: 'register', type: 'register', position: { x: 520, y: 80 }, data: { label: 'Bitácora de Obra', config: { collection: 'expenses' } } },
+      {
+        id: 'export',
+        type: 'export',
+        position: { x: 740, y: 80 },
+        data: {
+          label: 'Exportar comprobante (Excel)',
+          config: { format: 'xlsx', filename: 'gasto-obra-julio', title: 'Comprobante de Gasto de Obra' },
+        },
+      },
+      { id: 'reply', type: 'reply', position: { x: 960, y: 80 }, data: { label: 'Confirmar registro', config: { template: '' } } },
+    ],
+    edges: [
+      { id: 'message-agent', source: 'message', target: 'agent' },
+      { id: 'agent-register', source: 'agent', target: 'register' },
+      { id: 'register-export', source: 'register', target: 'export' },
+      { id: 'export-reply', source: 'export', target: 'reply' },
+    ],
   };
 
   const fepi3: SavedWorkflow = {
     id: 'fepi-3-reportes-evogym',
-    name: '3. Movimientos e Ingresos EvoGym (Gimnasio)',
-    nodes: clone(assistant.nodes).map((n) =>
-      n.type === 'message'
-        ? { ...n, data: { ...n.data, label: 'Consulta Admin EvoGym' } }
-        : n.type === 'knowledge'
-          ? {
-              ...n,
-              data: {
-                label: 'Movimientos del Día (Excel)',
-                config: {
-                  text: 'Regla: Suma correctamente Ingresos, Egresos, Suscripciones y Corte Neto (Ingresos - Egresos).',
-                  document_ids: ['sample-evogym-xlsx'],
-                },
-              },
-            }
-          : n.type === 'agent'
-            ? {
-                ...n,
-                data: {
-                  label: 'Analizador Financiero IA',
-                  config: {
-                    mode: 'answer',
-                    model: 'openai/gpt-4o-mini',
-                    instructions: 'Eres el asistente financiero de EvoGym. Responde preguntas sobre ingresos del día, suscripciones vendidas, egresos, métodos de pago y corte neto usando el Excel de movimientos.',
-                  },
-                },
-              }
-            : { ...n, data: { ...n.data, label: 'Reporte EvoGym' } },
-    ),
-    edges: clone(assistant.edges),
+    name: '3. Cortes y Reportes EvoGym (Gimnasio)',
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Consulta Admin EvoGym', config: {} } },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 300, y: 80 },
+        data: {
+          label: 'Intérprete de Filtros',
+          config: {
+            mode: 'query',
+            instructions: 'Interpreta el período y categoría para el corte administrativo del gimnasio.',
+          },
+        },
+      },
+      { id: 'query', type: 'query', position: { x: 520, y: 80 }, data: { label: 'Consultar tabla', config: { collection: 'expenses', period: 'all', category: '' } } },
+      { id: 'report', type: 'report', position: { x: 740, y: 80 }, data: { label: 'Corte administrativo', config: { amount_field: 'amount', group_by: 'category', title: 'Corte administrativo EvoGym' } } },
+      {
+        id: 'export',
+        type: 'export',
+        position: { x: 960, y: 80 },
+        data: {
+          label: 'Exportar corte (Excel)',
+          config: { format: 'xlsx', filename: 'corte-evogym', title: 'Corte administrativo EvoGym' },
+        },
+      },
+      { id: 'reply', type: 'reply', position: { x: 1180, y: 80 }, data: { label: 'Reporte EvoGym', config: { template: '' } } },
+    ],
+    edges: [
+      { id: 'message-agent', source: 'message', target: 'agent' },
+      { id: 'agent-query', source: 'agent', target: 'query' },
+      { id: 'query-report', source: 'query', target: 'report' },
+      { id: 'report-export', source: 'report', target: 'export' },
+      { id: 'export-reply', source: 'export', target: 'reply' },
+    ],
   };
 
   const fepi4: SavedWorkflow = {
     id: 'fepi-4-soporte-cursos',
-    name: '4. Soporte y Cursos en Línea (Fernando)',
-    nodes: clone(assistant.nodes).map((n) =>
-      n.type === 'message'
-        ? { ...n, data: { ...n.data, label: 'Ticket WhatsApp' } }
-        : n.type === 'knowledge'
-          ? {
-              ...n,
-              data: {
-                label: 'Guía Plataforma (PDF)',
-                config: {
-                  text: 'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.',
-                  document_ids: ['sample-soporte-pdf'],
-                },
-              },
-            }
-          : n.type === 'agent'
-            ? {
-                ...n,
-                data: {
-                  label: 'Clasificador Soporte IA',
-                  config: {
-                    mode: 'answer',
-                    model: 'openai/gpt-4o-mini',
-                    instructions: 'Atiende como mesa de soporte de la plataforma de capacitación. Clasifica si la solicitud es duda general o incidencia técnica y responde con pasos claros.',
-                  },
-                },
-              }
-            : { ...n, data: { ...n.data, label: 'Respuesta Soporte' } },
-    ),
-    edges: clone(assistant.edges),
+    name: '4. Soporte y Consulta de Registros (Fernando)',
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Ticket WhatsApp', config: {} } },
+      { id: 'query', type: 'query', position: { x: 300, y: 80 }, data: { label: 'Leer tabla guardada', config: { collection: 'expenses', period: 'all', category: '' } } },
+      {
+        id: 'knowledge',
+        type: 'knowledge',
+        position: { x: 520, y: 250 },
+        data: {
+          label: 'Guía Plataforma (PDF)',
+          config: {
+            text: 'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.',
+            document_ids: ['sample-soporte-pdf'],
+          },
+        },
+      },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 520, y: 80 },
+        data: {
+          label: 'Asistente IA (Guía + Tabla)',
+          config: {
+            mode: 'answer',
+            model: 'openai/gpt-4o-mini',
+            instructions: 'Atiende como mesa de soporte y asistente administrativo. Tienes acceso tanto a la guía de soporte como a la tabla de registros guardados. Responde dudas de la plataforma o preguntas sobre los registros guardados con pasos y datos claros.',
+          },
+        },
+      },
+      { id: 'reply', type: 'reply', position: { x: 740, y: 80 }, data: { label: 'Respuesta Soporte', config: { template: '' } } },
+    ],
+    edges: [
+      { id: 'message-query', source: 'message', target: 'query' },
+      { id: 'query-agent', source: 'query', target: 'agent' },
+      { id: 'knowledge-agent', source: 'knowledge', target: 'agent' },
+      { id: 'agent-reply', source: 'agent', target: 'reply' },
+    ],
   };
 
   return [fepi1, fepi2, fepi3, fepi4];
@@ -361,6 +398,7 @@ export function createDemo() {
 
     const fingerprint = JSON.stringify({ nodes, edges, message });
     let previous: unknown = message;
+    let lastRows: ExpenseRecord[] | null = null;
     let pendingToCommit: Omit<ExpenseRecord, 'id'> | null = null;
 
     try {
@@ -403,6 +441,28 @@ export function createDemo() {
           }
 
           if (mode === 'answer') {
+            if (Array.isArray(previous)) {
+              const recs = previous as ExpenseRecord[];
+              const rowsText = recs
+                .map((r) => `Fecha: ${r.date} | Concepto: ${r.concept} | Categoría: ${r.category} | Importe: $${r.amount}`)
+                .join('\n');
+              const tableRows = recs.map((r) => ({
+                Fecha: r.date,
+                Concepto: r.concept,
+                Categoría: r.category,
+                Importe: `$${r.amount}`,
+              }));
+              sources.push({
+                docName: 'Registros guardados',
+                kind: 'excel',
+                sections: [{
+                  label: 'Tabla de registros',
+                  sheet: 'Registros',
+                  rows: tableRows,
+                  text: rowsText || 'No hay registros guardados en este período.',
+                }],
+              });
+            }
             const instructions = String(cfg.instructions ?? '');
             const model = String(cfg.model ?? '');
             const llm = await tryOpenRouter(message, instructions, model, history, sources);
@@ -450,7 +510,9 @@ export function createDemo() {
           }
           pendingToCommit = preview;
         } else if (node.type === 'query') {
-          output = queryExpenseRecords(records, cfg, previous);
+          const queried = queryExpenseRecords(records, cfg, previous);
+          output = queried;
+          lastRows = queried;
         } else if (node.type === 'report') {
           if (i === 0 || order[i - 1].type !== 'query') {
             throw new Error('El informe requiere una consulta inmediatamente antes.');
@@ -458,6 +520,44 @@ export function createDemo() {
           const report = buildExpenseReport(previous as ExpenseRecord[], cfg);
           output = report;
           result.report = report;
+        } else if (node.type === 'export') {
+          const fmt = String(cfg.format ?? 'xlsx') === 'pdf' ? 'pdf' : 'xlsx';
+          const fname = String(cfg.filename ?? 'reporte-nodaly').trim() || 'reporte-nodaly';
+          let expRows: Record<string, string | number>[];
+          let expTitle = String(cfg.title ?? 'Documento generado');
+          let expSummary = String(previous ?? '');
+
+          if (Array.isArray(previous)) {
+            expRows = (previous as ExpenseRecord[]).map((r) => ({
+              Fecha: r.date,
+              Concepto: r.concept,
+              Categoría: r.category,
+              Importe: r.amount,
+            }));
+            expTitle = String(cfg.title ?? 'Tabla de registros');
+            expSummary = `Se exportaron ${expRows.length} registros.`;
+          } else if (lastRows && previous && typeof previous === 'object' && 'groups' in previous) {
+            const rep = previous as unknown as { title?: string; count: number; total: string };
+            expRows = lastRows.map((r) => ({
+              Fecha: r.date,
+              Concepto: r.concept,
+              Categoría: r.category,
+              Importe: r.amount,
+            }));
+            expTitle = rep.title || String(cfg.title ?? 'Informe de gastos');
+            expSummary = `${expTitle}: ${rep.count} registros, total $${rep.total}.`;
+          } else if (previous && typeof previous === 'object' && 'amount' in previous) {
+            const rec = previous as Omit<ExpenseRecord, 'id'>;
+            expRows = [{ Fecha: rec.date, Concepto: rec.concept, Categoría: rec.category, Importe: rec.amount }];
+            expTitle = String(cfg.title ?? 'Comprobante de registro');
+            expSummary = `Gasto registrado: ${rec.concept}, importe $${rec.amount}, fecha ${rec.date}.`;
+          } else {
+            expRows = [{ Fecha: today(), Pregunta: message, Respuesta: String(previous ?? '') }];
+          }
+
+          result.export_file = { format: fmt, filename: fname, title: expTitle, rows: expRows, summary: expSummary };
+          addStep(node, { format: fmt, filename: fname, rows: expRows.length });
+          continue;
         } else if (node.type === 'reply') {
           const template = String(cfg.template ?? '');
           if (template) {
