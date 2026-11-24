@@ -4,8 +4,11 @@ import {
   answerFromSources,
   buildExpenseReport,
   createSampleDocuments,
+  extractCustomRecord,
   extractExpense,
   extractFilters,
+  formatRecordSummaryLine,
+  parseFieldsSpec,
   queryExpenseRecords,
   type ExpenseRecord,
   type KnowledgeSource,
@@ -26,6 +29,7 @@ type SavedWorkflow = { id: string; name: string; nodes: FlowNode[]; edges: FlowE
 
 const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v2';
 const DOCUMENTS_KEY = 'nodaly.showcase.documents.v1';
+const RECORDS_KEY = 'nodaly.showcase.records.v1';
 const today = () => new Date().toISOString().slice(0, 10);
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -81,6 +85,38 @@ async function tryOpenRouter(
     const data = (await res.json()) as { reply?: string; model?: string; used_llm?: boolean };
     if (data.used_llm && data.reply) {
       return { reply: data.reply, model: data.model || model || 'openrouter' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function tryOpenRouterExtract(
+  message: string,
+  fields: string[],
+  collection: string,
+  instructions: string,
+  model: string,
+): Promise<{ extracted: Record<string, string>; model: string } | null> {
+  if (typeof window === 'undefined' || typeof fetch !== 'function') return null;
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'extract',
+        message,
+        fields,
+        collection,
+        instructions,
+        model: model || undefined,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { extracted?: Record<string, string>; model?: string; used_llm?: boolean };
+    if (data.used_llm && data.extracted) {
+      return { extracted: data.extracted, model: data.model || model || 'openrouter' };
     }
     return null;
   } catch {
@@ -259,10 +295,13 @@ function createSampleWorkflows(): SavedWorkflow[] {
 }
 
 export function createDemo() {
-  const records: ExpenseRecord[] = [
-    { id: 'lunch', date: today(), concept: 'Almuerzo ficticio', category: 'food', amount: '12.50' },
-    { id: 'notebooks', date: today(), concept: 'Cuadernos ficticios', category: 'supplies', amount: '23.75' },
+  const defaultRecords: ExpenseRecord[] = [
+    { id: 'lunch', date: today(), concept: 'Almuerzo ficticio', category: 'food', amount: '12.50', collection: 'expenses' },
+    { id: 'notebooks', date: today(), concept: 'Cuadernos ficticios', category: 'supplies', amount: '23.75', collection: 'expenses' },
   ];
+  const savedRecords = readStorage<ExpenseRecord[]>(RECORDS_KEY, []);
+  const records: ExpenseRecord[] = savedRecords.length ? savedRecords : defaultRecords;
+  const persistRecords = () => writeStorage(RECORDS_KEY, records);
 
   const samples = createSampleDocuments();
   const savedDocs = readStorage<StoredDocument[]>(DOCUMENTS_KEY, []);
@@ -277,7 +316,7 @@ export function createDemo() {
     ...defaultWorkflows.map((w) => [w.id, w] as [string, SavedWorkflow]),
     ...savedWorkflows.map((w) => [w.id, w] as [string, SavedWorkflow]),
   ]);
-  const pendingConfirmations = new Map<string, { fingerprint: string; preview: Omit<ExpenseRecord, 'id'>; committed: boolean }>();
+  const pendingConfirmations = new Map<string, { fingerprint: string; preview: Record<string, unknown>; collection: string; committed: boolean }>();
 
   const persistDocs = () => {
     const customDocs = documents.filter((d) => !samples.some((s) => s.id === d.id));
@@ -328,7 +367,12 @@ export function createDemo() {
       return { deleted: true };
     }
 
-    if (method === 'GET' && path === '/records') return [...records];
+    if (method === 'GET' && (path === '/records' || path.startsWith('/records?'))) {
+      const colMatch = path.match(/[?&]collection=([^&]+)/);
+      const col = colMatch ? decodeURIComponent(colMatch[1]) : '';
+      if (!col || col === 'all') return [...records];
+      return records.filter((r) => (r.collection || 'expenses').toLowerCase() === col.toLowerCase());
+    }
     if (path !== '/run') throw new Error('Esta acción no está disponible en este modo.');
 
     const { nodes, edges, message, run_id, confirm, history = [] } = JSON.parse(String(options?.body)) as RunRequest;
@@ -399,7 +443,18 @@ export function createDemo() {
     const fingerprint = JSON.stringify({ nodes, edges, message });
     let previous: unknown = message;
     let lastRows: ExpenseRecord[] | null = null;
-    let pendingToCommit: Omit<ExpenseRecord, 'id'> | null = null;
+    let pendingToCommit: { preview: Record<string, unknown>; collection: string } | null = null;
+
+    const toExportRow = (r: ExpenseRecord): Record<string, string | number> => {
+      if (r.data && Object.keys(r.data).length > 0) {
+        const outRow: Record<string, string | number> = { Tabla: r.collection || 'registro', Fecha: r.date };
+        for (const [k, v] of Object.entries(r.data)) {
+          if (k !== 'date' && k !== 'fecha') outRow[k] = String(v ?? '');
+        }
+        return outRow;
+      }
+      return { Fecha: r.date, Concepto: r.concept, Categoría: r.category, Importe: r.amount };
+    };
 
     try {
       for (let i = 0; i < order.length; i++) {
@@ -420,6 +475,7 @@ export function createDemo() {
             const kcfg = kn.data.config ?? {};
             const pasted = String(kcfg.text ?? '').trim();
             const docIds = Array.isArray(kcfg.document_ids) ? (kcfg.document_ids as string[]) : [];
+            const incCol = String(kcfg.include_collection ?? '').trim();
             let countForNode = 0;
 
             if (pasted) {
@@ -437,21 +493,32 @@ export function createDemo() {
                 countForNode += doc.sections.length;
               }
             }
+            if (incCol) {
+              const matchedRecs = incCol === 'all'
+                ? records
+                : records.filter((r) => (r.collection || 'expenses').toLowerCase() === incCol.toLowerCase());
+              const rowsText = matchedRecs.map(formatRecordSummaryLine).join('\n');
+              sources.push({
+                docName: 'Registros guardados',
+                kind: 'excel',
+                sections: [{
+                  label: `Tabla (${incCol})`,
+                  sheet: 'Registros',
+                  text: rowsText || 'No hay registros guardados en esta tabla.',
+                }],
+              });
+              countForNode += 1;
+            }
             addStep(kn, { sources: countForNode });
           }
 
           if (mode === 'answer') {
             if (Array.isArray(previous)) {
               const recs = previous as ExpenseRecord[];
-              const rowsText = recs
-                .map((r) => `Fecha: ${r.date} | Concepto: ${r.concept} | Categoría: ${r.category} | Importe: $${r.amount}`)
-                .join('\n');
-              const tableRows = recs.map((r) => ({
-                Fecha: r.date,
-                Concepto: r.concept,
-                Categoría: r.category,
-                Importe: `$${r.amount}`,
-              }));
+              const rowsText = recs.map(formatRecordSummaryLine).join('\n');
+              const tableRows = recs.map((r) =>
+                Object.fromEntries(Object.entries(toExportRow(r)).map(([k, v]) => [k, String(v)])),
+              );
               sources.push({
                 docName: 'Registros guardados',
                 kind: 'excel',
@@ -479,7 +546,29 @@ export function createDemo() {
               result.sources = citations;
             }
           } else if (mode === 'extract') {
-            output = extractExpense(message);
+            const nextNode = order[i + 1];
+            const regCfg = nextNode?.type === 'register' ? (nextNode.data.config ?? {}) : {};
+            const targetCol = String(regCfg.collection ?? 'expenses').trim() || 'expenses';
+            const fieldNames = parseFieldsSpec(cfg.fields ?? regCfg.fields);
+            if (targetCol === 'expenses' && fieldNames.length === 0) {
+              output = extractExpense(message);
+            } else {
+              const activeFields = fieldNames.length ? fieldNames : ['fecha', 'concepto', 'categoria', 'valor'];
+              const llmExtract = await tryOpenRouterExtract(
+                message,
+                activeFields,
+                targetCol,
+                String(cfg.instructions ?? ''),
+                String(cfg.model ?? ''),
+              );
+              if (llmExtract) {
+                output = llmExtract.extracted;
+                result.used_llm = true;
+                result.llm_model = llmExtract.model;
+              } else {
+                output = extractCustomRecord(message, activeFields);
+              }
+            }
           } else if (mode === 'query') {
             output = extractFilters(message);
           } else {
@@ -489,15 +578,16 @@ export function createDemo() {
           if (i === 0 || order[i - 1].type !== 'agent' || order[i - 1].data.config?.mode !== 'extract') {
             throw new Error('El registro requiere un agente de extracción inmediatamente antes.');
           }
+          const targetCol = String(cfg.collection ?? 'expenses').trim() || 'expenses';
           const saved = pendingConfirmations.get(run_id);
           if (saved && saved.fingerprint !== fingerprint) {
             throw new Error('El identificador de ejecución pertenece a otra solicitud.');
           }
-          let preview: Omit<ExpenseRecord, 'id'>;
+          let preview: Record<string, unknown>;
           if (!saved) {
             if (confirm) throw new Error('Revisa esta ejecución antes de confirmarla.');
-            preview = previous as Omit<ExpenseRecord, 'id'>;
-            pendingConfirmations.set(run_id, { fingerprint, preview, committed: false });
+            preview = previous as Record<string, unknown>;
+            pendingConfirmations.set(run_id, { fingerprint, preview, collection: targetCol, committed: false });
           } else {
             preview = saved.preview;
           }
@@ -508,7 +598,7 @@ export function createDemo() {
             addStep(node, preview, 'awaiting_confirmation');
             return result;
           }
-          pendingToCommit = preview;
+          pendingToCommit = { preview, collection: saved?.collection || targetCol };
         } else if (node.type === 'query') {
           const queried = queryExpenseRecords(records, cfg, previous);
           output = queried;
@@ -528,29 +618,24 @@ export function createDemo() {
           let expSummary = String(previous ?? '');
 
           if (Array.isArray(previous)) {
-            expRows = (previous as ExpenseRecord[]).map((r) => ({
-              Fecha: r.date,
-              Concepto: r.concept,
-              Categoría: r.category,
-              Importe: r.amount,
-            }));
+            expRows = (previous as ExpenseRecord[]).map(toExportRow);
             expTitle = String(cfg.title ?? 'Tabla de registros');
             expSummary = `Se exportaron ${expRows.length} registros.`;
           } else if (lastRows && previous && typeof previous === 'object' && 'groups' in previous) {
             const rep = previous as unknown as { title?: string; count: number; total: string };
-            expRows = lastRows.map((r) => ({
-              Fecha: r.date,
-              Concepto: r.concept,
-              Categoría: r.category,
-              Importe: r.amount,
-            }));
+            expRows = lastRows.map(toExportRow);
             expTitle = rep.title || String(cfg.title ?? 'Informe de gastos');
             expSummary = `${expTitle}: ${rep.count} registros, total $${rep.total}.`;
-          } else if (previous && typeof previous === 'object' && 'amount' in previous) {
+          } else if (previous && typeof previous === 'object' && 'amount' in previous && 'concept' in previous) {
             const rec = previous as Omit<ExpenseRecord, 'id'>;
             expRows = [{ Fecha: rec.date, Concepto: rec.concept, Categoría: rec.category, Importe: rec.amount }];
             expTitle = String(cfg.title ?? 'Comprobante de registro');
             expSummary = `Gasto registrado: ${rec.concept}, importe $${rec.amount}, fecha ${rec.date}.`;
+          } else if (previous && typeof previous === 'object') {
+            const rec = previous as Record<string, unknown>;
+            expRows = [Object.fromEntries(Object.entries(rec).map(([k, v]) => [k, String(v ?? '')]))];
+            expTitle = String(cfg.title ?? 'Comprobante de registro');
+            expSummary = `Registro guardado: ${Object.entries(rec).map(([k, v]) => `${k}: ${String(v ?? '')}`).join(', ')}.`;
           } else {
             expRows = [{ Fecha: today(), Pregunta: message, Respuesta: String(previous ?? '') }];
           }
@@ -565,15 +650,20 @@ export function createDemo() {
               previous && typeof previous === 'object' && !Array.isArray(previous)
                 ? (previous as Record<string, unknown>)
                 : { output: String(previous) };
-            output = template.replace(/\{([a-z_]+)\}/g, (match, key) =>
+            output = template.replace(/\{([a-zA-Z0-9_áéíóúÁÉÍÓÚñÑ]+)\}/g, (match, key) =>
               key in values ? String(values[key]) : match,
             );
-          } else if (previous && typeof previous === 'object' && !Array.isArray(previous) && 'amount' in previous) {
+          } else if (previous && typeof previous === 'object' && !Array.isArray(previous) && 'amount' in previous && 'concept' in previous) {
             const p = previous as Omit<ExpenseRecord, 'id'>;
             output = `Gasto registrado: ${p.concept}, importe $${p.amount}, fecha ${p.date}.`;
           } else if (previous && typeof previous === 'object' && !Array.isArray(previous) && 'groups' in previous) {
             const r = previous as unknown as { title: string; count: number; total: string };
             output = `${r.title || 'Informe de gastos'}: ${r.count} gastos, total $${r.total}.`;
+          } else if (previous && typeof previous === 'object' && !Array.isArray(previous)) {
+            const parts = Object.entries(previous as Record<string, unknown>)
+              .filter(([k, v]) => k !== 'id' && k !== 'data' && String(v ?? '').trim() !== '')
+              .map(([k, v]) => `${k}: ${String(v)}`);
+            output = parts.length ? `Registro guardado: ${parts.join(', ')}.` : 'No hay información disponible para mostrar.';
           } else if (Array.isArray(previous)) {
             output = `Se encontraron ${previous.length} registros.`;
           } else {
@@ -589,7 +679,27 @@ export function createDemo() {
       if (pendingToCommit) {
         const saved = pendingConfirmations.get(run_id);
         if (saved && !saved.committed) {
-          records.push({ id: run_id, ...pendingToCommit });
+          const p = pendingToCommit.preview;
+          const col = pendingToCommit.collection;
+          const isLegacyExpense = col === 'expenses' && 'concept' in p && 'amount' in p && 'category' in p;
+          const rDate = String(p.date ?? p.fecha ?? today()).slice(0, 10);
+          const rConcept = String(
+            p.concept ?? p.concepto ?? p.nombre ??
+            Object.entries(p).find(([k, v]) => !['date', 'fecha', 'amount', 'monto', 'importe', 'category', 'categoria'].includes(k) && v)?.[1] ??
+            message,
+          ).slice(0, 200);
+          const rCat = String(p.category ?? p.categoria ?? col).slice(0, 100);
+          const rAmount = String(p.amount ?? p.monto ?? p.importe ?? p.precio ?? p.total ?? '0.00');
+          records.push({
+            id: run_id,
+            date: rDate,
+            concept: rConcept,
+            category: rCat,
+            amount: rAmount,
+            collection: col,
+            ...(isLegacyExpense ? {} : { data: p }),
+          });
+          persistRecords();
           saved.committed = true;
         }
       }

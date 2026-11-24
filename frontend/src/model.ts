@@ -8,8 +8,8 @@ export const kinds: { type: Kind; label: string; description: string; icon: stri
   { type: 'knowledge', label: 'Base de conocimiento', description: 'Añade contexto confiable', icon: '▤', color: 'teal' },
   { type: 'agent', label: 'Agente de IA', description: 'Comprende y decide', icon: '✦', color: 'purple' },
   { type: 'reply', label: 'Responder', description: 'Envía una respuesta', icon: '↗', color: 'teal' },
-  { type: 'register', label: 'Registrar información', description: 'Guarda un gasto', icon: '▣', color: 'amber' },
-  { type: 'query', label: 'Consultar registros', description: 'Busca gastos guardados', icon: '⌕', color: 'blue' },
+  { type: 'register', label: 'Registrar información', description: 'Guarda datos en una tabla', icon: '▣', color: 'amber' },
+  { type: 'query', label: 'Consultar registros', description: 'Busca registros guardados', icon: '⌕', color: 'blue' },
   { type: 'report', label: 'Generar informe', description: 'Resume los resultados', icon: '▥', color: 'rose' },
   { type: 'export', label: 'Exportar archivo', description: 'Descarga Excel o PDF', icon: '⇩', color: 'emerald' },
 ];

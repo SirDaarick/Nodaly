@@ -36,6 +36,8 @@ def db():
     c.executescript('''CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,name TEXT NOT NULL,pages TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY,name TEXT NOT NULL,nodes TEXT NOT NULL,edges TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,date TEXT NOT NULL,concept TEXT NOT NULL,category TEXT NOT NULL,amount TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS record_meta(id TEXT PRIMARY KEY,collection TEXT NOT NULL,data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS telegram_bots(workflow_id TEXT PRIMARY KEY,token TEXT NOT NULL,bot_username TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS confirmations(run_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,preview TEXT NOT NULL,committed INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY);''')
     c.execute('BEGIN IMMEDIATE')
@@ -148,11 +150,15 @@ def get_document(did:str):
 async def upload(file:UploadFile=File(...)):
     name=Path((file.filename or '').replace('\\','/')).name
     suffix=Path(name).suffix.lower()
-    if len(name)>200 or suffix not in ('.txt','.pdf','.xlsx','.csv'): fail('Solo se admiten archivos PDF, Excel (.xlsx), CSV y TXT')
+    if len(name)>200 or suffix not in ('.txt','.md','.markdown','.pdf','.xlsx','.csv'): fail('Solo se admiten archivos PDF, Excel (.xlsx), CSV, TXT y Markdown (.md)')
     data=await file.read(5*1024*1024+1)
     if len(data)>5*1024*1024: fail('El archivo supera los 5 MB')
     try:
         if suffix=='.txt': pages=[data.decode('utf-8-sig')]
+        elif suffix in ('.md','.markdown'):
+            text_data=data.decode('utf-8-sig').strip()
+            parts=[p.strip() for p in re.split(r'\n(?=#{1,3}\s+)',text_data) if p.strip()]
+            pages=parts if parts else [text_data]
         elif suffix=='.csv':
             text_data=data.decode('utf-8-sig')
             rows=list(csv.reader(io.StringIO(text_data)))
@@ -185,16 +191,50 @@ def delete_document(did:str):
     with db() as c:
         if not c.execute('DELETE FROM documents WHERE id=?',(did,)).rowcount: raise HTTPException(404,'Documento no encontrado')
     return {'deleted':True}
+def get_all_records(collection:str=''):
+    with db() as c:
+        rows=c.execute('SELECT r.id,r.date,r.concept,r.category,r.amount,m.collection AS meta_collection,m.data AS meta_data FROM records r LEFT JOIN record_meta m ON r.id=m.id ORDER BY r.date DESC,r.id').fetchall()
+    items=[]
+    target=(collection or '').strip()
+    for r in rows:
+        col=r['meta_collection'] or 'expenses'
+        if target and target!='all' and col.lower()!=target.lower(): continue
+        if r['meta_data']:
+            parsed=json.loads(r['meta_data'])
+            item={'id':r['id'],'collection':col,'date':r['date'],**parsed,'data':parsed}
+        else:
+            item={'id':r['id'],'date':r['date'],'concept':r['concept'],'category':r['category'],'amount':r['amount']}
+        items.append(item)
+    return items
+
 @app.get('/api/records')
-def records():
-    with db() as c: return [dict(r) for r in c.execute('SELECT * FROM records ORDER BY date DESC,id')]
+def records(collection:str=''):
+    return get_all_records(collection)
+
+def parse_fields_spec(raw):
+    if isinstance(raw,list): items=[str(x).strip() for x in raw if str(x).strip()]
+    elif isinstance(raw,str): items=[x.strip() for x in re.split(r'[,;\n]+',raw) if x.strip()]
+    else: items=[]
+    seen=set(); out=[]
+    for item in items:
+        k=item.lower()
+        if k not in seen: seen.add(k); out.append(item)
+    return out
+
+def format_record_line(r):
+    data=r.get('data') if isinstance(r.get('data'),dict) else None
+    if data:
+        col=r.get('collection','registro')
+        parts=[f"{k}: {v}" for k,v in data.items() if v is not None and str(v).strip()!='']
+        return f"[{col}] " + ' | '.join(parts)
+    return f"Fecha: {r.get('date','')} | Concepto: {r.get('concept','')} | Categoría: {r.get('category','')} | Importe: ${r.get('amount','')}"
 
 def validate(nodes,edges):
     if not nodes or len(nodes)>30 or len(edges)>60: fail('El grafo debe contener entre 1 y 30 nodos y hasta 60 conexiones')
     if any(not isinstance(n,dict) or not isinstance(n.get('id'),str) or not n['id'] or n.get('type') not in ('message','knowledge','agent','reply','register','query','report','export') or not isinstance(n.get('data',{}),dict) or not isinstance(n.get('data',{}).get('config',{}),dict) for n in nodes): fail('Nodo no válido')
     for n in nodes:
         typ=n['type']; cfg=n.get('data',{}).get('config',{})
-        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000,'filename':120}.items():
+        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000,'filename':120,'fields':1000,'collection':100,'telegram_token':200,'telegram_chat_id':100,'include_collection':100,'amount_field':100,'group_by':100}.items():
             if key in cfg and (not isinstance(cfg[key],str) or len(cfg[key])>limit): fail('Configuración no válida: '+key)
         if typ=='export' and cfg.get('format','xlsx') not in ('xlsx','pdf'): fail('Formato de exportación no válido')
         if typ=='knowledge' and (not isinstance(cfg.get('document_ids',[]),list) or len(cfg.get('document_ids',[]))>3 or any(not isinstance(d,str) or len(d)>100 for d in cfg.get('document_ids',[]))): fail('La base de conocimiento admite hasta tres documentos')
@@ -227,9 +267,13 @@ def validate(nodes,edges):
     for i,ident in enumerate(order):
         typ=by[ident]['type']; cfg=by[ident].get('data',{}).get('config',{})
         if typ=='agent' and cfg.get('mode') not in ('answer','extract','query'): fail('Elige un modo válido para el agente de IA')
-        if typ in ('register','query') and cfg.get('collection')!='expenses': fail('Colección no válida')
+        if typ in ('register','query'):
+            col=str(cfg.get('collection','expenses')).strip()
+            if not col or len(col)>100 or not re.match(r'^[\w\s\-áéíóúÁÉÍÓÚñÑ]+$',col): fail('Colección no válida')
         if typ=='query' and cfg.get('period','all') not in ('all','today','week','month'): fail('Período no válido')
-        if typ=='report' and (cfg.get('amount_field','amount')!='amount' or cfg.get('group_by','category') not in ('category','none')): fail('Configuración de informe no válida')
+        if typ=='report':
+            af=str(cfg.get('amount_field','amount')).strip(); gb=str(cfg.get('group_by','category')).strip()
+            if not af or len(af)>100 or not gb or len(gb)>100: fail('Configuración de informe no válida')
         if typ=='register' and (i==0 or by[order[i-1]]['type']!='agent' or by[order[i-1]].get('data',{}).get('config',{}).get('mode')!='extract'): fail('El registro requiere un agente de extracción inmediatamente antes')
         if typ=='report' and (i==0 or by[order[i-1]]['type']!='query'): fail('El informe requiere una consulta inmediatamente antes')
     return by,order,contexts
@@ -245,6 +289,11 @@ def knowledge(ids,by):
                 row=c.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone()
                 if not row: fail('Un documento seleccionado ya no existe')
                 for i,p in enumerate(json.loads(row['pages'])): sources.append((row['name'],i+1 if row['name'].lower().endswith('.pdf') else None,p))
+            inc_col=str(cfg.get('include_collection','') or '').strip()
+            if inc_col:
+                recs=get_all_records('' if inc_col=='all' else inc_col)
+                lines=[format_record_line(r) for r in recs]
+                sources.append(('Registros guardados',None,'[Tabla: Registros guardados]\n'+('\n'.join(lines) if lines else 'No hay registros guardados en esta tabla.')))
     if sum(len(x[2]) for x in sources)>24000: fail('El contexto de conocimiento supera los 24000 caracteres')
     return sources
 
@@ -289,6 +338,65 @@ def extract(message):
         if any(w in low for w in words): category=cat; break
     return {'date':day,'concept':concept[:200],'category':category,'amount':f'{value:.2f}'}
 
+def extract_custom_fields(message,field_names):
+    text=(message or '').strip()
+    if not text: raise ValueError('El mensaje está vacío para extraer datos')
+    d=re.search(r'\b\d{4}-\d{2}-\d{2}\b',text); day=d.group() if d else date.today().isoformat()
+    result={}
+    kv_pairs=re.findall(r'([\wáéíóúÁÉÍÓÚñÑ\s]{1,40}?)\s*[:=]\s*([^,;\n]+)',text)
+    kv_map={k.strip().lower():v.strip() for k,v in kv_pairs if k.strip() and v.strip()}
+    parts=[p.strip() for p in re.split(r'[,;\n]+',text) if p.strip()]
+    nums=re.findall(r'(?<![\w.])\d+(?:[.,]\d{1,2})?(?![\w.])',text)
+    used_positional=0
+    for fname in field_names:
+        low=fname.lower()
+        if low in kv_map:
+            result[fname]=kv_map[low]
+        elif low in ('fecha','date'):
+            result[fname]=day
+        elif any(w in low for w in ('monto','importe','precio','total','cantidad','valor','amount','cost','costo')) and nums:
+            result[fname]=nums[0].replace(',','.')
+        elif len(parts)>=len(field_names) and used_positional<len(parts):
+            seg=re.sub(r'^[\wáéíóúÁÉÍÓÚñÑ\s]{1,30}\s*[:=]\s*','',parts[used_positional]).strip()
+            result[fname]=seg
+            used_positional+=1
+        elif used_positional==0:
+            result[fname]=text[:300]
+            used_positional+=1
+        else:
+            result[fname]=''
+    if 'date' not in result and 'fecha' not in {k.lower() for k in result}:
+        result['date']=day
+    if not any(str(v).strip() for k,v in result.items() if k not in ('date','fecha')):
+        raise ValueError('No se encontraron datos válidos para registrar en el mensaje')
+    return result
+
+def live_extract(message,field_names,instructions='',collection='registros',model_override=''):
+    or_key=os.environ.get('OPENROUTER_API_KEY')
+    ai_url=os.environ.get('NODALY_AI_URL') or ('https://openrouter.ai/api/v1/chat/completions' if or_key else '')
+    ai_key=os.environ.get('NODALY_AI_KEY') or or_key or ''
+    ai_model=model_override or os.environ.get('NODALY_AI_MODEL') or os.environ.get('OPENROUTER_MODEL','openai/gpt-4o-mini')
+    schema_hint=', '.join(field_names)
+    sys_prompt=(f"Eres un extractor de datos estructurados para la tabla '{collection}'. "
+        f"Extrae del mensaje del usuario exactamente estos campos: {schema_hint}. "
+        "Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional) donde las claves sean exactamente esos nombres de campo y 'date' en formato YYYY-MM-DD (usa hoy si no se menciona fecha). "
+        + (f"Instrucciones adicionales: {instructions}" if instructions else ""))
+    msgs=[{'role':'system','content':sys_prompt},{'role':'user','content':message}]
+    payload=json.dumps({'model':ai_model,'messages':msgs}).encode()
+    headers={'Authorization':'Bearer '+ai_key,'Content-Type':'application/json'}
+    if 'openrouter.ai' in ai_url:
+        headers['HTTP-Referer']='https://nodaly.vercel.app'; headers['X-Title']='Nodaly Flow Studio'
+    req=Request(ai_url,data=payload,headers=headers,method='POST')
+    with urlopen(req,timeout=30) as resp: res_data=json.load(resp)
+    raw=res_data['choices'][0]['message']['content'].strip()
+    m=re.search(r'\{[\s\S]*\}',raw)
+    if not m: raise ValueError('La IA no devolvió un JSON válido')
+    parsed=json.loads(m.group(0))
+    if not isinstance(parsed,dict): raise ValueError('La IA no devolvió un objeto JSON')
+    out={f:str(parsed.get(f,'')) for f in field_names}
+    out['date']=str(parsed.get('date') or date.today().isoformat())[:10]
+    return out, ai_model
+
 def filters(message):
     low=message.lower(); period='all'
     for p,words in [('today',('today','hoy')),('week',('week','semana')),('month',('month','mes'))]:
@@ -298,14 +406,38 @@ def filters(message):
 def query_records(cfg,previous):
     f=previous if isinstance(previous,dict) else {}; period=cfg.get('period','all'); period=period if period!='all' else f.get('period','all'); category=cfg.get('category','') or f.get('category','')
     if not isinstance(category,str) or len(category)>100: raise ValueError('Categoría no válida')
+    collection=str(cfg.get('collection','expenses') or 'expenses').strip()
     today=date.today(); start={'today':today,'week':today-timedelta(days=today.weekday()),'month':today.replace(day=1)}.get(period)
-    with db() as c: rows=[dict(r) for r in c.execute('SELECT * FROM records ORDER BY date,id')]
-    return [r for r in rows if (not start or start.isoformat()<=r['date']<=today.isoformat()) and (not category or r['category'].lower()==category.lower())]
+    rows=get_all_records(collection)
+    cat_low=category.strip().lower()
+    out=[]
+    for r in rows:
+        r_date=str(r.get('date',''))
+        if start and not (start.isoformat()<=r_date<=today.isoformat()): continue
+        if cat_low:
+            r_cat=str(r.get('category','')).lower()
+            if r_cat!=cat_low and not any(cat_low in str(v).lower() for k,v in r.items() if k not in ('id','data')):
+                continue
+        out.append(r)
+    return out
+
+def _safe_decimal(val):
+    if val is None: return Decimal('0')
+    s=re.sub(r'[^\d.,-]','',str(val).replace(',',''))
+    if not s or s=='-': return Decimal('0')
+    try: return Decimal(s)
+    except InvalidOperation: return Decimal('0')
+
 def report(rows,cfg):
     groups={}; total=Decimal('0')
+    amount_field=str(cfg.get('amount_field','amount') or 'amount')
+    group_by=str(cfg.get('group_by','category') or 'category')
     for r in rows:
-        v=Decimal(r['amount']); total+=v; cat=r['category']; g=groups.setdefault(cat,{'category':cat,'total':Decimal('0'),'count':0}); g['total']+=v; g['count']+=1
-    return {'title':cfg.get('title','Informe de gastos'), 'total':f'{total:.2f}','count':len(rows),'groups':[dict(g,total=f"{g['total']:.2f}") for g in groups.values()] if cfg.get('group_by','category')=='category' else []}
+        v=_safe_decimal(r.get(amount_field,r.get('amount',0)))
+        total+=v
+        cat=str(r.get(group_by) or r.get('category') or 'General')
+        g=groups.setdefault(cat,{'category':cat,'total':Decimal('0'),'count':0}); g['total']+=v; g['count']+=1
+    return {'title':cfg.get('title','Informe de gastos'), 'total':f'{total:.2f}','count':len(rows),'groups':[dict(g,total=f"{g['total']:.2f}") for g in groups.values()] if group_by!='none' else []}
 
 def live_answer(message,sources,instructions,model_override='',history=None):
     or_key=os.environ.get('OPENROUTER_API_KEY')
@@ -330,13 +462,18 @@ def live_answer(message,sources,instructions,model_override='',history=None):
         return result['choices'][0]['message']['content'], ai_model
     except Exception: raise ValueError('Falló la solicitud al proveedor de IA configurado')
 
+def _row_to_export_dict(r):
+    if isinstance(r.get('data'),dict):
+        return {'Tabla':r.get('collection','registro'),'Fecha':r.get('date',''),**{k:v for k,v in r['data'].items() if k not in ('date','fecha')}}
+    return {'Fecha':r.get('date',''),'Concepto':r.get('concept',''),'Categoría':r.get('category',''),'Importe':r.get('amount','')}
+
 @app.post('/api/run')
 def run(body:Run):
     by,order,contexts=validate(body.nodes,body.edges)
     fingerprint=hashlib.sha256(json.dumps({'nodes':body.nodes,'edges':body.edges,'message':body.message},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-    pending=None; steps=[]; previous=body.message; last_rows=None; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
+    pending=None; pending_collection='expenses'; steps=[]; previous=body.message; last_rows=None; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
     try:
-        for ident in order:
+        for idx,ident in enumerate(order):
             n=by[ident]; typ=n['type']; cfg=n.get('data',{}).get('config',{}); output=previous
             if typ=='message': output=body.message
             elif typ=='agent':
@@ -344,7 +481,7 @@ def run(body:Run):
                 for context_id in contexts[ident]: steps.append({'node_id':context_id,'status':'completed','output':{'sources':len(sources)}})
                 if kind=='answer':
                     if isinstance(previous,list):
-                        table_lines=[f"Fecha: {r.get('date','')} | Concepto: {r.get('concept','')} | Categoría: {r.get('category','')} | Importe: ${r.get('amount','')}" for r in previous if isinstance(r,dict)]
+                        table_lines=[format_record_line(r) for r in previous if isinstance(r,dict)]
                         sources.append(('Registros guardados',None,'[Tabla: Registros guardados]\n'+('\n'.join(table_lines) if table_lines else 'No hay registros guardados en este período.')))
                     output,used=answer(body.message,sources)
                     if mode()=='live':
@@ -353,15 +490,30 @@ def run(body:Run):
                         result['used_llm']=True
                         result['llm_model']=used_model
                     result['sources']=used
-                elif kind=='extract': output=extract(body.message)
+                elif kind=='extract':
+                    next_reg=by[order[idx+1]] if idx+1<len(order) and by[order[idx+1]]['type']=='register' else None
+                    reg_cfg=next_reg.get('data',{}).get('config',{}) if next_reg else {}
+                    target_col=str(reg_cfg.get('collection','expenses') or 'expenses').strip()
+                    fields_spec=cfg.get('fields') or reg_cfg.get('fields') or ''
+                    field_names=parse_fields_spec(fields_spec)
+                    if target_col=='expenses' and not field_names:
+                        output=extract(body.message)
+                    else:
+                        if not field_names: field_names=['fecha','concepto','categoria','valor']
+                        if mode()=='live':
+                            output,used_model=live_extract(body.message,field_names,str(cfg.get('instructions','')),target_col,str(cfg.get('model','')))
+                            result['used_llm']=True; result['llm_model']=used_model
+                        else:
+                            output=extract_custom_fields(body.message,field_names)
                 else: output=filters(body.message)
             elif typ=='register':
+                pending_collection=str(cfg.get('collection','expenses') or 'expenses').strip()
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE'); saved=c.execute('SELECT * FROM confirmations WHERE run_id=?',(body.run_id,)).fetchone()
                     if saved and saved['fingerprint']!=fingerprint: raise ValueError('El identificador de ejecución pertenece a otra solicitud')
                     if not saved:
                         if body.confirm: raise ValueError('Revisa esta ejecución antes de confirmarla')
-                        c.execute('INSERT INTO confirmations(run_id,fingerprint,preview) VALUES(?,?,?)',(body.run_id,fingerprint,json.dumps(previous))); output=previous
+                        c.execute('INSERT INTO confirmations(run_id,fingerprint,preview) VALUES(?,?,?)',(body.run_id,fingerprint,json.dumps(previous,ensure_ascii=False))); output=previous
                     else: output=json.loads(saved['preview'])
                     result['preview']=output
                     if not body.confirm:
@@ -372,17 +524,21 @@ def run(body:Run):
             elif typ=='export':
                 fmt=cfg.get('format','xlsx'); fname=(cfg.get('filename') or 'reporte-nodaly').strip() or 'reporte-nodaly'
                 if isinstance(previous,list):
-                    exp_rows=[{'Fecha':r.get('date',''),'Concepto':r.get('concept',''),'Categoría':r.get('category',''),'Importe':r.get('amount','')} for r in previous if isinstance(r,dict)]
+                    exp_rows=[_row_to_export_dict(r) for r in previous if isinstance(r,dict)]
                     exp_title=cfg.get('title') or 'Tabla de registros'
                     exp_summary=f"Se exportaron {len(exp_rows)} registros."
                 elif last_rows is not None and isinstance(previous,dict) and 'groups' in previous:
-                    exp_rows=[{'Fecha':r.get('date',''),'Concepto':r.get('concept',''),'Categoría':r.get('category',''),'Importe':r.get('amount','')} for r in last_rows if isinstance(r,dict)]
+                    exp_rows=[_row_to_export_dict(r) for r in last_rows if isinstance(r,dict)]
                     exp_title=previous.get('title') or cfg.get('title') or 'Informe de gastos'
                     exp_summary=f"{exp_title}: {previous['count']} registros, total ${previous['total']}."
                 elif isinstance(previous,dict) and 'amount' in previous:
                     exp_rows=[{'Fecha':previous.get('date',''),'Concepto':previous.get('concept',''),'Categoría':previous.get('category',''),'Importe':previous.get('amount','')}]
                     exp_title=cfg.get('title') or 'Comprobante de registro'
                     exp_summary=f"Gasto registrado: {previous['concept']}, importe ${previous['amount']}, fecha {previous['date']}."
+                elif isinstance(previous,dict):
+                    exp_rows=[{k:str(v) for k,v in previous.items()}]
+                    exp_title=cfg.get('title') or 'Comprobante de registro'
+                    exp_summary='Registro guardado: '+', '.join(f"{k}: {v}" for k,v in previous.items())+'.'
                 else:
                     exp_rows=[{'Fecha':date.today().isoformat(),'Pregunta':body.message,'Respuesta':str(previous)}]
                     exp_title=cfg.get('title') or 'Documento generado'
@@ -395,12 +551,14 @@ def run(body:Run):
                 if not isinstance(template,str) or len(template)>4000: raise ValueError('Plantilla de respuesta no válida')
                 if template:
                     values=previous if isinstance(previous,dict) else {'output':str(previous)}
-                    output=re.sub(r'\{([a-z_]+)\}',lambda m:str(values.get(m.group(1),m.group(0))),template)
-                elif isinstance(previous,dict) and 'amount' in previous:
+                    output=re.sub(r'\{([a-zA-Z0-9_áéíóúÁÉÍÓÚñÑ]+)\}',lambda m:str(values.get(m.group(1),m.group(0))),template)
+                elif isinstance(previous,dict) and 'amount' in previous and 'concept' in previous:
                     output=f"Gasto registrado: {previous['concept']}, importe {previous['amount']}, fecha {previous['date']}."
                 elif isinstance(previous,dict) and 'groups' in previous:
                     output=f"{previous['title'] or 'Informe de gastos'}: {previous['count']} gastos, total {previous['total']}."
-                elif isinstance(previous,dict): output='No hay información disponible para mostrar.'
+                elif isinstance(previous,dict):
+                    summary_parts=[f"{k}: {v}" for k,v in previous.items() if k not in ('id','data') and str(v).strip()!='']
+                    output=('Registro guardado: '+', '.join(summary_parts)+'.') if summary_parts else 'No hay información disponible para mostrar.'
                 elif isinstance(previous,list): output=f'Se encontraron {len(previous)} registros.'
                 else: output=str(previous)
                 result['reply']=output
@@ -411,9 +569,96 @@ def run(body:Run):
                 saved=c.execute('SELECT * FROM confirmations WHERE run_id=?',(body.run_id,)).fetchone()
                 if not saved or saved['fingerprint']!=fingerprint: raise ValueError('La confirmación ya no coincide con esta solicitud')
                 if not saved['committed']:
-                    c.execute('INSERT INTO records VALUES(?,?,?,?,?)',(str(uuid.uuid4()),pending['date'],pending['concept'],pending['category'],pending['amount']))
+                    r_id=str(uuid.uuid4())
+                    r_date=str(pending.get('date') or pending.get('fecha') or date.today().isoformat())[:10]
+                    r_concept=str(pending.get('concept') or pending.get('concepto') or pending.get('nombre') or next((v for k,v in pending.items() if k not in ('date','fecha','amount','monto','importe','category','categoria') and v),'') or body.message)[:200]
+                    r_category=str(pending.get('category') or pending.get('categoria') or pending_collection)[:100]
+                    r_amount=str(pending.get('amount') or pending.get('monto') or pending.get('importe') or pending.get('precio') or pending.get('total') or '0.00')
+                    c.execute('INSERT INTO records VALUES(?,?,?,?,?)',(r_id,r_date,r_concept,r_category,r_amount))
+                    if pending_collection!='expenses' or set(pending.keys())!={'date','concept','category','amount'}:
+                        c.execute('INSERT OR REPLACE INTO record_meta VALUES(?,?,?)',(r_id,pending_collection,json.dumps(pending,ensure_ascii=False)))
                     c.execute('UPDATE confirmations SET committed=1 WHERE run_id=?',(body.run_id,))
     except (ValueError,TypeError,KeyError,sqlite3.Error) as exc:
         result['status']='error'; result['error']=str(exc); steps.append({'node_id':ident,'status':'error','output':str(exc)})
     return result
+
+def _tg_call(token:str,method:str,payload:dict=None):
+    url=f'https://api.telegram.org/bot{token}/{method}'
+    data=json.dumps(payload).encode() if payload is not None else None
+    headers={'Content-Type':'application/json'} if data is not None else {}
+    req=Request(url,data=data,headers=headers,method='POST' if data is not None else 'GET')
+    try:
+        with urlopen(req,timeout=15) as resp: res=json.load(resp)
+    except Exception as exc:
+        raise HTTPException(422,detail=f'No se pudo conectar con Telegram: {exc}')
+    if not res.get('ok'):
+        raise HTTPException(422,detail=res.get('description','Token o solicitud de Telegram no válida'))
+    return res.get('result')
+
+class TgVerify(BaseModel):
+    token:str=Field(min_length=10,max_length=200)
+
+class TgPoll(BaseModel):
+    token:str=Field(min_length=10,max_length=200); offset:int=0; nodes:list[dict]; edges:list[dict]; auto_confirm:bool=True
+
+class TgWebhook(BaseModel):
+    token:str=Field(min_length=10,max_length=200); webhook_url:str=Field(min_length=10,max_length=500); workflow_id:str='default'; nodes:list[dict]; edges:list[dict]
+
+@app.post('/api/telegram/verify')
+def telegram_verify(body:TgVerify):
+    bot=_tg_call(body.token.strip(),'getMe')
+    return {'ok':True,'bot':bot}
+
+@app.post('/api/telegram/poll')
+def telegram_poll(body:TgPoll):
+    token=body.token.strip()
+    updates=_tg_call(token,'getUpdates',{'offset':body.offset,'timeout':1,'allowed_updates':['message']})
+    processed=[]; next_offset=body.offset
+    for u in updates or []:
+        uid=u.get('update_id',0)
+        if uid>=next_offset: next_offset=uid+1
+        msg=u.get('message') or {}
+        text=str(msg.get('text') or '').strip()
+        chat_id=(msg.get('chat') or {}).get('id')
+        if not text or chat_id is None: continue
+        from_user=(msg.get('from') or {}).get('username') or (msg.get('from') or {}).get('first_name') or 'Usuario'
+        rid=f'tg-{uid}'
+        res=run(Run(nodes=body.nodes,edges=body.edges,message=text,run_id=rid,confirm=False,history=[]))
+        if res.get('status')=='awaiting_confirmation' and body.auto_confirm:
+            res=run(Run(nodes=body.nodes,edges=body.edges,message=text,run_id=rid,confirm=True,history=[]))
+        reply_text=res.get('reply') or res.get('error') or ('Registro pendiente de confirmación.' if res.get('status')=='awaiting_confirmation' else 'Flujo ejecutado.')
+        _tg_call(token,'sendMessage',{'chat_id':chat_id,'text':reply_text})
+        processed.append({'update_id':uid,'chat_id':chat_id,'from_user':from_user,'text':text,'reply':reply_text,'run':res})
+    return {'processed':processed,'next_offset':next_offset}
+
+@app.post('/api/telegram/webhook')
+def telegram_webhook(body:TgWebhook):
+    token=body.token.strip()
+    bot=_tg_call(token,'getMe')
+    target=body.webhook_url.rstrip('/')+f'/api/telegram/incoming/{body.workflow_id}'
+    _tg_call(token,'setWebhook',{'url':target})
+    with db() as c:
+        c.execute('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',(body.workflow_id,f'Telegram Bot ({bot.get("username","bot")})',json.dumps(body.nodes),json.dumps(body.edges)))
+        c.execute('INSERT OR REPLACE INTO telegram_bots VALUES(?,?,?,?)',(body.workflow_id,token,bot.get('username',''),date.today().isoformat()))
+    return {'ok':True,'webhook_url':target,'bot':bot}
+
+@app.post('/api/telegram/incoming/{workflow_id}')
+async def telegram_incoming(workflow_id:str,request:FastAPIRequest):
+    payload=await request.json()
+    msg=payload.get('message') or {}
+    text=str(msg.get('text') or '').strip()
+    chat_id=(msg.get('chat') or {}).get('id')
+    if not text or chat_id is None: return {'ok':True,'ignored':True}
+    with db() as c:
+        wf=c.execute('SELECT * FROM workflows WHERE id=?',(workflow_id,)).fetchone()
+        bot=c.execute('SELECT * FROM telegram_bots WHERE workflow_id=?',(workflow_id,)).fetchone()
+    if not wf or not bot: raise HTTPException(404,'Flujo o bot de Telegram no encontrado')
+    rid=f'tg-wh-{payload.get("update_id",uuid.uuid4())}'
+    nodes=json.loads(wf['nodes']); edges=json.loads(wf['edges'])
+    res=run(Run(nodes=nodes,edges=edges,message=text,run_id=rid,confirm=False,history=[]))
+    if res.get('status')=='awaiting_confirmation':
+        res=run(Run(nodes=nodes,edges=edges,message=text,run_id=rid,confirm=True,history=[]))
+    reply_text=res.get('reply') or res.get('error') or 'Flujo ejecutado.'
+    _tg_call(bot['token'],'sendMessage',{'chat_id':chat_id,'text':reply_text})
+    return {'ok':True,'reply':reply_text}
 

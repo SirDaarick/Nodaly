@@ -6,6 +6,8 @@ export type ExpenseRecord = {
   concept: string;
   category: string;
   amount: string;
+  collection?: string;
+  data?: Record<string, unknown>;
 };
 
 export type KnowledgeSource = {
@@ -407,6 +409,78 @@ export function extractFilters(message: string): { period: string; category: str
   return { period, category };
 }
 
+export function parseFieldsSpec(raw: unknown): string[] {
+  const items = Array.isArray(raw)
+    ? raw.map((x) => String(x).trim()).filter(Boolean)
+    : typeof raw === 'string'
+      ? raw.split(/[,;\n]+/).map((x) => x.trim()).filter(Boolean)
+      : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const k = item.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+export function formatRecordSummaryLine(r: ExpenseRecord): string {
+  if (r.data && Object.keys(r.data).length > 0) {
+    const col = r.collection || 'registro';
+    const parts = Object.entries(r.data)
+      .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+      .map(([k, v]) => `${k}: ${String(v)}`);
+    return `[${col}] ${parts.join(' | ')}`;
+  }
+  return `Fecha: ${r.date} | Concepto: ${r.concept} | Categoría: ${r.category} | Importe: $${r.amount}`;
+}
+
+export function extractCustomRecord(message: string, fieldNames: string[]): Record<string, string> {
+  const text = (message || '').trim();
+  if (!text) throw new Error('El mensaje está vacío para extraer datos.');
+  const dateMatch = text.match(/\b\d{4}-\d{2}-\d{2}\b/);
+  const day = dateMatch ? dateMatch[0] : new Date().toISOString().slice(0, 10);
+
+  const kvMap = new Map<string, string>();
+  for (const match of text.matchAll(/([\wáéíóúÁÉÍÓÚñÑ\s]{1,40}?)\s*[:=]\s*([^,;\n]+)/g)) {
+    const k = match[1].trim().toLowerCase();
+    const v = match[2].trim();
+    if (k && v) kvMap.set(k, v);
+  }
+  const parts = text.split(/[,;\n]+/).map((p) => p.trim()).filter(Boolean);
+  const nums = [...text.matchAll(/(?<![\w.])\d+(?:[.,]\d{1,2})?(?![\w.])/g)].map((m) => m[0]);
+  let usedPos = 0;
+
+  const result: Record<string, string> = {};
+  for (const fname of fieldNames) {
+    const low = fname.toLowerCase();
+    if (kvMap.has(low)) {
+      result[fname] = kvMap.get(low)!;
+    } else if (low === 'fecha' || low === 'date') {
+      result[fname] = day;
+    } else if (/(monto|importe|precio|total|cantidad|valor|amount|cost|costo)/.test(low) && nums.length > 0) {
+      result[fname] = nums[0].replace(',', '.');
+    } else if (parts.length >= fieldNames.length && usedPos < parts.length) {
+      result[fname] = parts[usedPos].replace(/^[\wáéíóúÁÉÍÓÚñÑ\s]{1,30}\s*[:=]\s*/, '').trim();
+      usedPos += 1;
+    } else if (usedPos === 0) {
+      result[fname] = text.slice(0, 300);
+      usedPos += 1;
+    } else {
+      result[fname] = '';
+    }
+  }
+  if (!('date' in result) && !fieldNames.some((f) => f.toLowerCase() === 'fecha')) {
+    result.date = day;
+  }
+  const hasContent = Object.entries(result).some(([k, v]) => k !== 'date' && k.toLowerCase() !== 'fecha' && v.trim() !== '');
+  if (!hasContent) throw new Error('No se encontraron datos válidos para registrar en el mensaje.');
+  return result;
+}
+
 export function queryExpenseRecords(
   records: ExpenseRecord[],
   cfg: Record<string, unknown>,
@@ -416,6 +490,7 @@ export function queryExpenseRecords(
   const cfgPeriod = String(cfg.period ?? 'all');
   const period = cfgPeriod !== 'all' ? cfgPeriod : String(prev.period ?? 'all');
   const category = String(cfg.category ?? '') || String(prev.category ?? '');
+  const collection = String(cfg.collection ?? 'expenses').trim() || 'expenses';
 
   const now = new Date();
   const todayIso = now.toISOString().slice(0, 10);
@@ -431,33 +506,53 @@ export function queryExpenseRecords(
     startIso = `${todayIso.slice(0, 8)}01`;
   }
 
-  return records.filter(
-    (r) =>
-      (!startIso || (r.date >= startIso && r.date <= todayIso)) &&
-      (!category || r.category.toLowerCase() === category.toLowerCase()),
-  );
+  const catLow = category.trim().toLowerCase();
+  return records.filter((r) => {
+    const rCol = (r.collection || 'expenses').toLowerCase();
+    if (collection !== 'all' && rCol !== collection.toLowerCase()) return false;
+    if (startIso && !(r.date >= startIso && r.date <= todayIso)) return false;
+    if (catLow) {
+      const directMatch = r.category.toLowerCase() === catLow;
+      const anyMatch =
+        r.concept.toLowerCase().includes(catLow) ||
+        (r.data ? Object.values(r.data).some((v) => String(v ?? '').toLowerCase().includes(catLow)) : false);
+      if (!directMatch && !anyMatch) return false;
+    }
+    return true;
+  });
 }
 
 export function buildExpenseReport(rows: ExpenseRecord[], cfg: Record<string, unknown>) {
+  const amountField = String(cfg.amount_field ?? 'amount').trim() || 'amount';
+  const groupBy = String(cfg.group_by ?? 'category').trim() || 'category';
   const groupTotals = new Map<string, { category: string; cents: number; count: number }>();
   let totalCents = 0;
 
   for (const row of rows) {
-    const cents = Math.round(Number(row.amount) * 100);
+    const rawVal = row.data && amountField in row.data ? row.data[amountField] : (row as Record<string, unknown>)[amountField] ?? row.amount;
+    const parsedNum = Number(String(rawVal ?? '0').replace(/[^\d.,-]/g, '').replace(/,/g, ''));
+    const cents = Number.isFinite(parsedNum) ? Math.round(parsedNum * 100) : 0;
     totalCents += cents;
-    const group = groupTotals.get(row.category) ?? { category: row.category, cents: 0, count: 0 };
+
+    const rawGroup =
+      groupBy === 'none'
+        ? 'General'
+        : row.data && groupBy in row.data
+          ? String(row.data[groupBy] ?? row.category ?? 'General')
+          : String((row as Record<string, unknown>)[groupBy] ?? row.category ?? 'General');
+    const groupKey = rawGroup || 'General';
+    const group = groupTotals.get(groupKey) ?? { category: groupKey, cents: 0, count: 0 };
     group.cents += cents;
     group.count += 1;
-    groupTotals.set(row.category, group);
+    groupTotals.set(groupKey, group);
   }
 
-  const groupBy = String(cfg.group_by ?? 'category');
   return {
     title: String(cfg.title ?? 'Informe de gastos'),
     total: (totalCents / 100).toFixed(2),
     count: rows.length,
     groups:
-      groupBy === 'category'
+      groupBy !== 'none'
         ? [...groupTotals.values()].map(({ category, count, cents }) => ({
             category,
             count,

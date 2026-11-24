@@ -168,6 +168,28 @@ export async function parseDocumentFile(file: File): Promise<StoredDocument> {
       sections: [{ label: file.name, text }],
     };
   }
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
+    const text = (await file.text()).trim();
+    if (!text) throw new Error('El archivo Markdown está vacío.');
+    if (text.length > MAX_TEXT_CHARS) {
+      throw new Error(`El documento supera el límite de ${MAX_TEXT_CHARS.toLocaleString()} caracteres.`);
+    }
+    const rawParts = text.split(/\n(?=#{1,3}\s+)/).map((p) => p.trim()).filter(Boolean);
+    const hasHeadings = rawParts.length > 1 || /^#{1,3}\s+/.test(text);
+    const sections: DocumentSection[] = hasHeadings
+      ? rawParts.map((part) => {
+          const firstLine = part.split('\n')[0]?.replace(/^#{1,3}\s+/, '').trim() || 'Sección';
+          return { label: `${file.name} (${firstLine})`, text: part };
+        })
+      : [{ label: file.name, text }];
+    return {
+      id: crypto.randomUUID(),
+      name: file.name,
+      kind: 'text',
+      text_length: text.length,
+      sections,
+    };
+  }
 
-  throw new Error('Formato no compatible. Usa archivos PDF, Excel (.xlsx, .xls), CSV o TXT.');
+  throw new Error('Formato no compatible. Usa archivos PDF, Excel (.xlsx, .xls), CSV, TXT o Markdown (.md).');
 }

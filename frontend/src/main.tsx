@@ -27,7 +27,7 @@ type Run = {
   report?: { title?: string; total: string; count: number; groups: { category: string; total: string; count: number }[] };
   export_file?: { format: 'xlsx' | 'pdf'; filename: string; title: string; rows: Record<string, string | number>[]; summary: string };
 };
-type RecordItem = { id: string; date: string; concept: string; category: string; amount: string };
+type RecordItem = { id: string; date: string; concept: string; category: string; amount: string; collection?: string; data?: Record<string, unknown> };
 type ChatEntry = {
   id: string;
   sender: 'user' | 'bot';
@@ -138,6 +138,10 @@ function App() {
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const [backendUrl, setBackendUrl] = useState<string>(() => getInitialBackendUrl());
   const [backendInput, setBackendInput] = useState<string>(() => getInitialBackendUrl());
+  const [recordsFilter, setRecordsFilter] = useState<string>('all');
+  const [tgPolling, setTgPolling] = useState(false);
+  const [tgStatus, setTgStatus] = useState('');
+  const tgOffsetRef = useRef<number>(0);
   const presentationDialog = useRef<HTMLDialogElement>(null);
   const docDialog = useRef<HTMLDialogElement>(null);
   const ngrokDialog = useRef<HTMLDialogElement>(null);
@@ -272,7 +276,7 @@ function App() {
       const botText = result.status === 'error'
         ? (result.error || 'Ocurrió un error al ejecutar el flujo.')
         : result.status === 'awaiting_confirmation'
-          ? 'Encontré este gasto. Revisa los datos y confírmalo para guardarlo:'
+          ? 'Encontré estos datos. Revisa la vista previa y confírmala para guardar el registro:'
           : (result.reply || 'Flujo ejecutado.');
 
       const isQuoteFlow = (name.toLowerCase().includes('dulces') || name.toLowerCase().includes('sandra')) && result.status === 'completed' && botText.includes('$');
@@ -309,10 +313,103 @@ function App() {
     }
   }
 
+  async function verifyTelegramBot(token: string) {
+    const clean = token.trim();
+    if (!clean) { setError('Pega primero el token de tu bot de Telegram.'); return; }
+    setBusy(true); setError(''); setTgStatus('Verificando…');
+    try {
+      let username = '';
+      if (backendUrl || !demo) {
+        const res = await api<{ ok: boolean; bot: { username?: string; first_name?: string } }>('/telegram/verify', json({ token: clean }), backendUrl);
+        username = res.bot?.username || res.bot?.first_name || 'Bot';
+      } else {
+        const resp = await fetch(`https://api.telegram.org/bot${clean}/getMe`);
+        const data = await resp.json() as { ok: boolean; description?: string; result?: { username?: string; first_name?: string } };
+        if (!data.ok || !data.result) throw new Error(data.description || 'Token de Telegram no válido.');
+        username = data.result.username || data.result.first_name || 'Bot';
+      }
+      updateConfig('telegram_bot_username', username);
+      setTgStatus(`Conectado a @${username}`);
+      setNotice(`Bot de Telegram verificado: @${username}`);
+    } catch (e) {
+      setTgStatus('');
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    const msgNode = nodes.find(n => n.type === 'message');
+    const tgToken = String(msgNode?.data.config?.telegram_token ?? '').trim();
+    const autoConfirm = msgNode?.data.config?.telegram_auto_confirm !== false;
+    if (!tgPolling || !tgToken) return;
+
+    let cancelled = false;
+    const pollOnce = async () => {
+      try {
+        if (backendUrl || !demo) {
+          const res = await api<{ processed: { update_id: number; from_user: string; text: string; reply: string; run: Run }[]; next_offset: number }>(
+            '/telegram/poll',
+            json({ token: tgToken, offset: tgOffsetRef.current, nodes, edges, auto_confirm: autoConfirm }),
+            backendUrl,
+          );
+          if (cancelled) return;
+          tgOffsetRef.current = res.next_offset;
+          if (res.processed.length) {
+            await refreshRecords();
+            setChatHistory(prev => [
+              ...prev,
+              ...res.processed.flatMap(p => ([
+                { id: crypto.randomUUID(), sender: 'user' as const, text: `[Telegram @${p.from_user}]: ${p.text}`, time: nowTime() },
+                { id: crypto.randomUUID(), sender: 'bot' as const, text: p.reply, time: nowTime(), run: p.run },
+              ])),
+            ]);
+          }
+        } else {
+          const resp = await fetch(`https://api.telegram.org/bot${tgToken}/getUpdates?offset=${tgOffsetRef.current}&timeout=1`);
+          const data = await resp.json() as { ok: boolean; result?: { update_id: number; message?: { text?: string; chat?: { id: number }; from?: { username?: string; first_name?: string } } }[] };
+          if (!data.ok || !Array.isArray(data.result) || cancelled) return;
+          for (const u of data.result) {
+            if (u.update_id >= tgOffsetRef.current) tgOffsetRef.current = u.update_id + 1;
+            const text = String(u.message?.text ?? '').trim();
+            const chatId = u.message?.chat?.id;
+            if (!text || chatId === undefined) continue;
+            const fromUser = u.message?.from?.username || u.message?.from?.first_name || 'Usuario';
+            const rid = `tg-${u.update_id}`;
+            let runRes = await api<Run>('/run', json({ nodes, edges, message: text, run_id: rid, confirm: false, history: [] }), backendUrl);
+            if (runRes.status === 'awaiting_confirmation' && autoConfirm) {
+              runRes = await api<Run>('/run', json({ nodes, edges, message: text, run_id: rid, confirm: true, history: [] }), backendUrl);
+            }
+            const replyText = runRes.reply || runRes.error || 'Flujo ejecutado.';
+            await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, text: replyText }),
+            });
+            if (cancelled) return;
+            await refreshRecords();
+            setChatHistory(prev => [
+              ...prev,
+              { id: crypto.randomUUID(), sender: 'user', text: `[Telegram @${fromUser}]: ${text}`, time: nowTime() },
+              { id: crypto.randomUUID(), sender: 'bot', text: replyText, time: nowTime(), run: runRes },
+            ]);
+          }
+        }
+      } catch {
+        // Keep polling silently on transient network hiccups.
+      }
+    };
+
+    void pollOnce();
+    const timer = window.setInterval(() => { void pollOnce(); }, 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [tgPolling, nodes, edges, backendUrl]);
+
   async function upload(file?: File) {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024 || !/\.(pdf|txt|xlsx|xls|csv)$/i.test(file.name)) {
-      setError('Selecciona un archivo PDF, Excel (.xlsx, .xls), CSV o TXT de hasta 5 MB.');
+    if (file.size > 5 * 1024 * 1024 || !/\.(pdf|txt|md|markdown|xlsx|xls|csv)$/i.test(file.name)) {
+      setError('Selecciona un archivo PDF, Excel (.xlsx, .xls), CSV, TXT o Markdown (.md) de hasta 5 MB.');
       return;
     }
     setBusy(true);
@@ -767,32 +864,71 @@ function App() {
             </div>
           ) : (
             <div className="records">
-              <div className="export-bar">
-                <button
-                  className="button secondary"
-                  disabled={!records.length}
-                  onClick={() => exportRowsToExcel(
-                    records.map(r => ({ Fecha: r.date, Concepto: r.concept, Categoría: displayCategory(r.category), Importe: Number(r.amount) })),
-                    'registros_gastos_nodaly.xlsx',
-                    'Gastos',
-                  )}
-                >
-                  <Download size={14}/> Exportar Excel (.xlsx)
-                </button>
-                <button
-                  className="button secondary"
-                  disabled={!records.length}
-                  onClick={() => exportPrintPdf(
-                    'Registros de Gastos — Nodaly',
-                    `${records.length} registros guardados`,
-                    [{ label: 'Total', value: `$${records.reduce((s, r) => s + Number(r.amount), 0).toFixed(2)}` }],
-                    records.map(r => `• ${r.date} | ${r.concept} (${displayCategory(r.category)}) — $${r.amount}`).join('\n'),
-                  )}
-                >
-                  <FileText size={14}/> Exportar PDF
-                </button>
-              </div>
-              {records.length ? <table><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Importe</th></tr></thead><tbody>{records.map(r=><tr key={r.id}><td>{r.date}</td><td>{r.concept}</td><td>{displayCategory(r.category)}</td><td>{r.amount}</td></tr>)}</tbody></table> : <p>Aún no hay registros.</p>}
+              {(() => {
+                const colsList = [...new Set(['expenses', ...records.map(r => r.collection || 'expenses'), ...nodes.filter(n => n.type === 'register' || n.type === 'query').map(n => String(n.data.config?.collection || 'expenses')).filter(c => c && c !== 'all')])];
+                const filteredRecords = recordsFilter === 'all'
+                  ? records
+                  : records.filter(r => (r.collection || 'expenses').toLowerCase() === recordsFilter.toLowerCase());
+                const dynamicKeys = [...new Set(filteredRecords.flatMap(r => r.data ? Object.keys(r.data) : ['concept', 'category', 'amount']))];
+                const exportable = filteredRecords.map((r): Record<string, string | number> => {
+                  if (r.data) {
+                    const row: Record<string, string | number> = { Tabla: r.collection || 'registro', Fecha: r.date };
+                    for (const [k, v] of Object.entries(r.data)) row[k] = String(v ?? '');
+                    return row;
+                  }
+                  return { Tabla: r.collection || 'expenses', Fecha: r.date, Concepto: r.concept, Categoría: displayCategory(r.category), Importe: Number(r.amount) };
+                });
+                return <>
+                  <div className="export-bar">
+                    <select aria-label="Filtrar tabla" value={recordsFilter} onChange={e => setRecordsFilter(e.target.value)} style={{ padding: '7px 10px', borderRadius: '8px', border: '1px solid #dce3ec', fontSize: '12px' }}>
+                      <option value="all">Todas las tablas ({records.length})</option>
+                      {colsList.map(col => <option key={col} value={col}>{col === 'expenses' ? 'Gastos (expenses)' : col}</option>)}
+                    </select>
+                    <button
+                      className="button secondary"
+                      disabled={!filteredRecords.length}
+                      onClick={() => exportRowsToExcel(exportable, `registros_${recordsFilter}_nodaly.xlsx`, 'Registros')}
+                    >
+                      <Download size={14}/> Exportar Excel (.xlsx)
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={!filteredRecords.length}
+                      onClick={() => exportPrintPdf(
+                        `Registros (${recordsFilter}) — Nodaly`,
+                        `${filteredRecords.length} registros guardados`,
+                        [{ label: 'Tabla', value: recordsFilter }],
+                        filteredRecords.map(r => r.data ? `• [${r.collection || 'registro'}] ${Object.entries(r.data).map(([k, v]) => `${k}: ${String(v ?? '')}`).join(' | ')}` : `• ${r.date} | ${r.concept} (${displayCategory(r.category)}) — $${r.amount}`).join('\n'),
+                      )}
+                    >
+                      <FileText size={14}/> Exportar PDF
+                    </button>
+                  </div>
+                  {filteredRecords.length ? (
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Tabla</th>
+                          <th>Fecha</th>
+                          {dynamicKeys.filter(k => k !== 'date' && k !== 'fecha').map(k => <th key={k}>{displayField(k)}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredRecords.map(r => (
+                          <tr key={r.id}>
+                            <td><small>{r.collection || 'expenses'}</small></td>
+                            <td>{r.date}</td>
+                            {dynamicKeys.filter(k => k !== 'date' && k !== 'fecha').map(k => {
+                              const raw = r.data ? r.data[k] : (r as Record<string, unknown>)[k];
+                              return <td key={k}>{k === 'category' ? displayCategory(String(raw ?? '')) : String(raw ?? '—')}</td>;
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : <p>Aún no hay registros en esta tabla.</p>}
+                </>;
+              })()}
             </div>
           )}
         </div>
@@ -804,8 +940,22 @@ function App() {
           <div className="selected-card"><span className={`node-icon ${meta(current.type).color}`}>{meta(current.type).icon}</span><div><strong>{displayLabel(current.data.label)}</strong><small>{meta(current.type).description}</small></div><span className="selected-dot"/></div>
           <div className="settings">
             <label>Nombre del nodo<input value={displayLabel(current.data.label)} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selected?{...n,data:{...n.data,label:e.target.value}}:n))}/></label>
-            <p className="settings-intro">{current.type === 'knowledge' ? 'Sube un PDF, Excel o pega texto y visualiza su contenido aquí.' : current.type === 'agent' ? 'Elige la tarea, el modelo de OpenRouter y las instrucciones del agente.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p>
-            <Settings node={current} docs={docs} update={updateConfig} upload={upload} inspectDoc={inspectDoc} removeDoc={removeDoc} busy={busy}/>
+            <p className="settings-intro">{current.type === 'knowledge' ? 'Sube un PDF, Excel, Markdown (.md) o vincula registros guardados.' : current.type === 'agent' ? 'Elige la tarea, el modelo de OpenRouter y las instrucciones del agente.' : 'Personaliza cómo funciona este paso en tu flujo.'}</p>
+            <Settings
+              node={current}
+              docs={docs}
+              records={records}
+              nodes={nodes}
+              update={updateConfig}
+              upload={upload}
+              inspectDoc={inspectDoc}
+              removeDoc={removeDoc}
+              busy={busy}
+              tgPolling={tgPolling}
+              setTgPolling={setTgPolling}
+              tgStatus={tgStatus}
+              verifyTelegramBot={verifyTelegramBot}
+            />
             <button className="delete-button" onClick={()=>{setNodes(ns=>ns.filter(n=>n.id!==selected));setEdges(es=>es.filter(e=>e.source!==selected&&e.target!==selected));setSelected('');setRun(null);}}><Trash2 size={15}/> Eliminar nodo</button>
           </div>
         </> : <div className="empty-inspector"><span>✧</span><p>Selecciona un nodo en el lienzo para ver su configuración.</p></div>}
@@ -816,16 +966,56 @@ function App() {
   </div>;
 }
 
-function Settings({node, docs, update, upload, inspectDoc, removeDoc, busy}: {node:FlowNode; docs:Doc[]; update:(k:string,v:unknown)=>void; upload:(f?:File)=>void; inspectDoc:(id:string)=>void; removeDoc:(id:string)=>void; busy:boolean}) {
+function Settings({node, docs, records, nodes, update, upload, inspectDoc, removeDoc, busy, tgPolling, setTgPolling, tgStatus, verifyTelegramBot}: {node:FlowNode; docs:Doc[]; records:RecordItem[]; nodes:FlowNode[]; update:(k:string,v:unknown)=>void; upload:(f?:File)=>void; inspectDoc:(id:string)=>void; removeDoc:(id:string)=>void; busy:boolean; tgPolling:boolean; setTgPolling:React.Dispatch<React.SetStateAction<boolean>>; tgStatus:string; verifyTelegramBot:(t:string)=>void}) {
   const c: Config = node.data.config; const value = (k:string) => String(c[k] ?? '');
-  if (node.type === 'message') return <div className="hint"><strong>Punto de inicio</strong><p>Cada mensaje enviado en el chat WhatsApp inicia el flujo desde aquí.</p></div>;
+  const knownCollections = [...new Set(['expenses', ...records.map(r => r.collection || 'expenses'), ...nodes.filter(n => n.type === 'register' || n.type === 'query').map(n => String(n.data.config?.collection || 'expenses')).filter(col => col && col !== 'all')])];
+
+  if (node.type === 'message') {
+    const token = value('telegram_token');
+    const botUsername = value('telegram_bot_username');
+    return <>
+      <div className="hint"><strong>Simulador + Telegram</strong><p>Cada mensaje enviado en el chat o recibido desde tu bot de Telegram inicia el flujo aquí.</p></div>
+      <label>Token del Bot de Telegram (@BotFather)
+        <input type="password" value={token} onChange={e=>update('telegram_token',e.target.value)} placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"/>
+      </label>
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        <button type="button" className="button secondary" disabled={busy || !token.trim()} onClick={() => verifyTelegramBot(token)}>Verificar Bot</button>
+        <button
+          type="button"
+          className={`button ${tgPolling ? 'primary' : 'secondary'}`}
+          disabled={!token.trim()}
+          onClick={() => setTgPolling(p => !p)}
+        >
+          {tgPolling ? 'Detener escucha Telegram' : 'Escuchar Telegram en vivo'}
+        </button>
+      </div>
+      {(botUsername || tgStatus) && (
+        <div className="hint">
+          <strong>{tgStatus || `Bot vinculado: @${botUsername}`}</strong>
+          <p>{tgPolling ? 'Escuchando mensajes cada 3 s y respondiendo en vivo al bot y al simulador.' : 'Pulsa "Escuchar Telegram en vivo" para recibir mensajes reales de Telegram aquí.'}</p>
+        </div>
+      )}
+      <label style={{ flexDirection: 'row', alignItems: 'center', gap: '8px' }}>
+        <input type="checkbox" checked={c.telegram_auto_confirm !== false} onChange={e => update('telegram_auto_confirm', e.target.checked)}/>
+        <span>Confirmar registros automáticamente desde Telegram</span>
+      </label>
+    </>;
+  }
+
   if (node.type === 'knowledge') {
     const ids = (c.document_ids as string[]) || [];
     return <>
       <label>Texto adicional<textarea rows={3} value={value('text')} onChange={e=>update('text',e.target.value)} placeholder="Pega información extra para tu asistente…"/></label>
-      <div className="label-row"><strong>Documentos (PDF / Excel / CSV)</strong><span>{ids.length}/3 activos</span></div>
-      <p className="field-help">Sube tu menú en PDF o tu inventario en Excel. Haz clic en el ojo para ver lo que se extrajo.</p>
-      <label className="upload"><Upload size={17}/> Cargar PDF, Excel o TXT<input type="file" accept=".pdf,.txt,.xlsx,.xls,.csv,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>
+      <label>Usar tabla de registros como conocimiento
+        <select value={value('include_collection')} onChange={e=>update('include_collection',e.target.value)}>
+          <option value="">Ninguna tabla</option>
+          <option value="all">Todas las tablas guardadas</option>
+          {knownCollections.map(col => <option key={col} value={col}>{col === 'expenses' ? 'Gastos (expenses)' : col}</option>)}
+        </select>
+      </label>
+      <div className="label-row"><strong>Documentos (PDF / Excel / CSV / MD / TXT)</strong><span>{ids.length}/3 activos</span></div>
+      <p className="field-help">Sube tu menú en PDF, inventario en Excel o documentación en Markdown (.md). Haz clic en el ojo para ver lo que se extrajo.</p>
+      <label className="upload"><Upload size={17}/> Cargar PDF, Excel, MD o TXT<input type="file" accept=".pdf,.txt,.md,.markdown,.xlsx,.xls,.csv,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>
       <div className="documents">
         {docs.map(d=>(
           <div className="document" key={d.id}>
@@ -844,11 +1034,11 @@ function Settings({node, docs, update, upload, inspectDoc, removeDoc, busy}: {no
     <label>Tarea del agente
       <select value={value('mode')} onChange={e=>update('mode',e.target.value)}>
         <option value="answer">Responder con la base de conocimiento</option>
-        <option value="extract">Extraer gasto</option>
-        <option value="query">Extraer filtros del informe</option>
+        <option value="extract">Extraer datos para registro</option>
+        <option value="query">Extraer filtros de consulta</option>
       </select>
     </label>
-    {value('mode') === 'answer' && (
+    {(value('mode') === 'answer' || value('mode') === 'extract') && (
       <label>Modelo de OpenRouter
         <select value={value('model') || 'openai/gpt-4o-mini'} onChange={e=>update('model',e.target.value)}>
           <option value="openai/gpt-4o-mini">GPT-4o mini (rápido)</option>
@@ -858,14 +1048,55 @@ function Settings({node, docs, update, upload, inspectDoc, removeDoc, busy}: {no
         </select>
       </label>
     )}
-    <label>Instrucciones<textarea rows={4} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Ej. Responde como mesero amable de Taquería La Esquina…"/></label>
-    <div className="hint"><strong>OpenRouter + respaldo local</strong><p>Si <code>OPENROUTER_API_KEY</code> está configurada en Vercel, el agente usa el modelo seleccionado; si no, responde con el motor local.</p></div>
+    <label>Instrucciones<textarea rows={4} value={value('instructions')} onChange={e=>update('instructions',e.target.value)} placeholder="Ej. Responde como mesero amable o extrae cliente, producto y monto…"/></label>
+    <div className="hint"><strong>OpenRouter + respaldo local</strong><p>Si <code>OPENROUTER_API_KEY</code> está configurada, el agente usa IA tanto para responder como para extraer campos personalizados.</p></div>
   </>;
-  if(node.type==='reply') return <label>Plantilla de respuesta<textarea rows={5} value={value('template')} onChange={e=>update('template',e.target.value)} placeholder="Deja este campo vacío para usar el resultado anterior."/><span className="field-help">Deja este campo vacío para usar el resultado del paso anterior.</span></label>;
-  if(node.type==='register') return <div className="hint"><strong>Colección: Gastos</strong><p>Se muestra una vista previa en el chat antes de guardar.</p></div>;
-  if(node.type==='query') return <><label>Período<select value={value('period')} onChange={e=>update('period',e.target.value)}><option value="all">Todo el tiempo</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label><label>Categoría<select value={value('category')} onChange={e=>update('category',e.target.value)}><option value="">Todas las categorías</option>{['food','transport','supplies','utilities','other'].map(category=><option key={category} value={category}>{displayCategory(category)}</option>)}</select></label><p className="field-help">El período o la categoría seleccionados reemplazan los filtros extraídos del mensaje.</p></>;
-  if(node.type==='export') return <><label>Formato de exportación<select value={value('format') || 'xlsx'} onChange={e=>update('format',e.target.value)}><option value="xlsx">Excel (.xlsx)</option><option value="pdf">Documento PDF</option></select></label><label>Nombre del archivo<input value={value('filename')} onChange={e=>update('filename',e.target.value)} placeholder="reporte-nodaly"/></label><label>Título del documento<input value={value('title')} onChange={e=>update('title',e.target.value)} placeholder="Reporte Nodaly"/></label><div className="hint"><strong>Descarga directa en el chat</strong><p>Al ejecutarse este nodo, aparece un botón en el simulador de WhatsApp para descargar el archivo con los datos del paso anterior.</p></div></>;
-  return <><label>Título del informe<input value={displayLabel(value('title'))} onChange={e=>update('title',e.target.value)}/></label><label>Agrupar por<select value={value('group_by')} onChange={e=>update('group_by',e.target.value)}><option value="category">Categoría</option><option value="none">Sin agrupar</option></select></label><div className="hint"><strong>Campo de importe: importe</strong><p>Los totales se calculan a partir de los gastos guardados.</p></div></>;
+  if (node.type === 'reply') {
+    const regNode = nodes.find(n => n.type === 'register');
+    const regFields = String(regNode?.data.config?.fields ?? '').trim();
+    const hints = regFields ? regFields.split(/[,;\n]+/).map(s => `{${s.trim()}}`).filter(s => s !== '{}').join(', ') : '{concept}, {amount}, {date}, {output}';
+    return <>
+      <label>Plantilla de respuesta<textarea rows={5} value={value('template')} onChange={e=>update('template',e.target.value)} placeholder="Deja este campo vacío para usar el resultado anterior."/><span className="field-help">Variables disponibles: {hints}</span></label>
+    </>;
+  }
+  if (node.type === 'register') return <>
+    <label>Nombre de la tabla / colección
+      <input list="nodaly-collections" value={value('collection') || 'expenses'} onChange={e=>update('collection',e.target.value)} placeholder="expenses, clientes, pedidos, citas…"/>
+      <datalist id="nodaly-collections">
+        {knownCollections.map(col => <option key={col} value={col}/>)}
+        <option value="clientes"/><option value="pedidos"/><option value="inventario"/><option value="citas"/>
+      </datalist>
+    </label>
+    <label>Campos a registrar (separados por coma)
+      <input value={value('fields')} onChange={e=>update('fields',e.target.value)} placeholder="Ej. nombre, telefono, producto, monto"/>
+      <span className="field-help">Déjalo vacío en la tabla <code>expenses</code> para usar el formato clásico de gastos (fecha, concepto, categoría, importe).</span>
+    </label>
+  </>;
+  if (node.type === 'query') return <>
+    <label>Tabla / colección a consultar
+      <input list="nodaly-query-collections" value={value('collection') || 'expenses'} onChange={e=>update('collection',e.target.value)} placeholder="expenses, all, clientes…"/>
+      <datalist id="nodaly-query-collections">
+        <option value="all"/>
+        {knownCollections.map(col => <option key={col} value={col}/>)}
+      </datalist>
+    </label>
+    <label>Período<select value={value('period')} onChange={e=>update('period',e.target.value)}><option value="all">Todo el tiempo</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label>
+    <label>Categoría o filtro de búsqueda
+      <input list="nodaly-query-cats" value={value('category')} onChange={e=>update('category',e.target.value)} placeholder="Todas (o escribe un término/categoría)"/>
+      <datalist id="nodaly-query-cats">
+        {['food','transport','supplies','utilities','other'].map(category=><option key={category} value={category}>{displayCategory(category)}</option>)}
+      </datalist>
+    </label>
+    <p className="field-help">Puedes consultar cualquier tabla y conectarla a un Agente IA para usar sus datos como base de conocimiento.</p>
+  </>;
+  if (node.type === 'export') return <><label>Formato de exportación<select value={value('format') || 'xlsx'} onChange={e=>update('format',e.target.value)}><option value="xlsx">Excel (.xlsx)</option><option value="pdf">Documento PDF</option></select></label><label>Nombre del archivo<input value={value('filename')} onChange={e=>update('filename',e.target.value)} placeholder="reporte-nodaly"/></label><label>Título del documento<input value={value('title')} onChange={e=>update('title',e.target.value)} placeholder="Reporte Nodaly"/></label><div className="hint"><strong>Descarga directa en el chat</strong><p>Al ejecutarse este nodo, aparece un botón en el simulador para descargar el archivo con los datos del paso anterior.</p></div></>;
+  return <>
+    <label>Título del informe<input value={displayLabel(value('title'))} onChange={e=>update('title',e.target.value)}/></label>
+    <label>Campo numérico a sumar<input value={value('amount_field') || 'amount'} onChange={e=>update('amount_field',e.target.value)} placeholder="amount, monto, total…"/></label>
+    <label>Agrupar por campo<input list="nodaly-group-by" value={value('group_by') || 'category'} onChange={e=>update('group_by',e.target.value)} placeholder="category, none, vendedor…"/>
+      <datalist id="nodaly-group-by"><option value="category"/><option value="none"/></datalist>
+    </label>
+  </>;
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><ReactFlowProvider><App/></ReactFlowProvider></React.StrictMode>);

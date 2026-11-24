@@ -175,4 +175,59 @@ class API(unittest.TestCase):
         bad=dict(evogym,nodes=[{**n,'data':{**n['data'],'config':{**n['data']['config'],'format':'exe'}}} if n['type']=='export' else n for n in evogym['nodes']])
         self.assertEqual(self.c.post('/api/run',json={**bad,'message':'Muestra todos los gastos','run_id':'bad-export','confirm':False}).status_code,422)
 
+    def test_markdown_upload_and_knowledge_answer(self):
+        md_bytes=b'# Manual\nEl horario es 9 AM a 6 PM.\n\n## Precios\nLa membresia anual cuesta 4500 MXN.'
+        up=self.c.post('/api/documents',files={'file':('manual.md',md_bytes,'text/markdown')})
+        self.assertEqual(up.status_code,200)
+        doc_id=up.json()['id']
+        t=self.c.get('/api/templates').json()[0]
+        next(n for n in t['nodes'] if n['type']=='knowledge')['data']['config'].update(text='',document_ids=[doc_id])
+        r=self.c.post('/api/run',json={**t,'message':'¿Cuánto cuesta la membresia anual?','run_id':'md-test','confirm':False}).json()
+        self.assertEqual(r['status'],'completed')
+        self.assertIn('4500',r['reply'])
+        self.assertEqual(r['sources'][0]['name'],'manual.md')
+
+    def test_generic_collection_register_query_and_knowledge_bridge(self):
+        t=self.c.get('/api/templates').json()[1]
+        next(n for n in t['nodes'] if n['type']=='register')['data']['config'].update(collection='clientes',fields='nombre, telefono, producto, monto')
+        next(n for n in t['nodes'] if n['type']=='reply')['data']['config']['template']='Cliente {nombre} registrado por {monto}.'
+        msg='nombre: Ana Perez, telefono: 5512345678, producto: Plan Pro, monto: 990'
+        r1=self.c.post('/api/run',json={**t,'message':msg,'run_id':'gen-1','confirm':False}).json()
+        self.assertEqual(r1['status'],'awaiting_confirmation')
+        self.assertEqual(r1['preview']['nombre'],'Ana Perez')
+        self.assertEqual(r1['preview']['monto'],'990')
+        r2=self.c.post('/api/run',json={**t,'message':msg,'run_id':'gen-1','confirm':True}).json()
+        self.assertEqual(r2['status'],'completed')
+        self.assertEqual(r2['reply'],'Cliente Ana Perez registrado por 990.')
+        recs=self.c.get('/api/records?collection=clientes').json()
+        self.assertEqual(len(recs),1)
+        self.assertEqual(recs[0]['nombre'],'Ana Perez')
+
+        # Use clientes table directly inside Knowledge Base node
+        qa=self.c.get('/api/templates').json()[0]
+        next(n for n in qa['nodes'] if n['type']=='knowledge')['data']['config'].update(text='',document_ids=[],include_collection='clientes')
+        r3=self.c.post('/api/run',json={**qa,'message':'Ana Perez','run_id':'gen-kb','confirm':False}).json()
+        self.assertEqual(r3['status'],'completed')
+        self.assertIn('Ana Perez',r3['reply'])
+        self.assertEqual(r3['sources'][0]['name'],'Registros guardados')
+
+    def test_telegram_verify_and_poll(self):
+        class TgResp:
+            def __init__(self,body): self.body=body
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def read(self): return self.body
+        t=self.c.get('/api/templates').json()[0]
+        with patch.object(application,'urlopen',return_value=TgResp(b'{"ok":true,"result":{"username":"nodaly_test_bot"}}')):
+            v=self.c.post('/api/telegram/verify',json={'token':'123456:ABCDEF1234567890'}).json()
+            self.assertTrue(v['ok'])
+            self.assertEqual(v['bot']['username'],'nodaly_test_bot')
+        updates_json='{"ok":true,"result":[{"update_id":101,"message":{"chat":{"id":999},"from":{"username":"edani"},"text":"¿Qué es Nodaly?"}}]}'.encode('utf-8')
+        send_json=b'{"ok":true,"result":{"message_id":1}}'
+        with patch.object(application,'urlopen',side_effect=[TgResp(updates_json),TgResp(send_json)]):
+            p=self.c.post('/api/telegram/poll',json={'token':'123456:ABCDEF1234567890','offset':0,'nodes':t['nodes'],'edges':t['edges']}).json()
+            self.assertEqual(p['next_offset'],102)
+            self.assertEqual(len(p['processed']),1)
+            self.assertIn('Nodaly',p['processed'][0]['reply'])
+
 if __name__ == '__main__': unittest.main()
