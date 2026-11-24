@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { defaultConfig } from './model';
 import { parseDocumentFile } from './documents';
 import { buildExpenseReport, extractCustomRecord, queryExpenseRecords } from './engine';
+import { renderMarkdownBlocks } from './markdown';
 
 describe('node configuration', () => {
   it('creates independent knowledge document lists', () => {
@@ -38,5 +40,24 @@ describe('markdown and generic records', () => {
     const rep = buildExpenseReport(queried, { amount_field: 'monto', group_by: 'producto', title: 'Ventas' });
     expect(rep.total).toBe('1500.00');
     expect(rep.groups[0].category).toBe('Mesa');
+  });
+
+  it('renders markdown headings, bold, lists, code, and tables safely', () => {
+    const md = [
+      '## Cotización',
+      'Hola **Laura**, aquí está tu resumen con `10%` de descuento:',
+      '- Mesa Premium: $3,200',
+      '• Envío: $250',
+      '',
+      '| Concepto | Total |',
+      '| --- | --- |',
+      '| Total | $3,450 |',
+    ].join('\n');
+    const html = renderToStaticMarkup(renderMarkdownBlocks(md) as any);
+    expect(html).toContain('md-h2');
+    expect(html).toContain('<strong>Laura</strong>');
+    expect(html).toContain('<code class="md-code">10%</code>');
+    expect(html).toContain('<ul class="md-list">');
+    expect(html).toContain('<table class="md-table">');
   });
 });

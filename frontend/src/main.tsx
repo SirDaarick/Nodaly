@@ -8,6 +8,7 @@ import './style.css';
 import { createDemo } from './demo';
 import { parseDocumentFile, type StoredDocument } from './documents';
 import { exportPrintPdf, exportRowsToExcel } from './exports';
+import { StreamingMarkdown, renderMarkdownBlocks } from './markdown';
 import { defaultConfig, kinds, runPresentation, updateDimensions, displayLabel, displayStatus, displayCategory, displayField, displayOutput, type Kind, type FlowNode, type FlowEdge, type Config } from './model';
 
 type Flow = { id: string; name: string; description?: string; nodes: FlowNode[]; edges: FlowEdge[]; message?: string };
@@ -36,6 +37,7 @@ type ChatEntry = {
   isError?: boolean;
   run?: Run;
   isQuote?: boolean;
+  animate?: boolean;
 };
 type OwnerNotification = {
   id: string;
@@ -292,6 +294,7 @@ function App() {
           isError: result.status === 'error',
           run: result,
           isQuote: isQuoteFlow,
+          animate: true,
         },
       ]);
     } catch (e) {
@@ -353,7 +356,7 @@ function App() {
               ...prev,
               ...res.processed.flatMap(p => ([
                 { id: crypto.randomUUID(), sender: 'user' as const, text: `[Telegram @${p.from_user}]: ${p.text}`, time: nowTime() },
-                { id: crypto.randomUUID(), sender: 'bot' as const, text: p.reply, time: nowTime(), run: p.run },
+                { id: crypto.randomUUID(), sender: 'bot' as const, text: p.reply, time: nowTime(), run: p.run, animate: true },
               ])),
             ]);
           }
@@ -383,7 +386,7 @@ function App() {
             setChatHistory(prev => [
               ...prev,
               { id: crypto.randomUUID(), sender: 'user', text: `[Telegram @${fromUser}]: ${text}`, time: nowTime() },
-              { id: crypto.randomUUID(), sender: 'bot', text: replyText, time: nowTime(), run: runRes },
+              { id: crypto.randomUUID(), sender: 'bot', text: replyText, time: nowTime(), run: runRes, animate: true },
             ]);
           }
         }
@@ -666,7 +669,19 @@ function App() {
                   chatHistory.map(item => (
                     <div key={item.id} className={`wa-row ${item.sender}`}>
                       <div className={`wa-bubble ${item.sender} ${item.isError ? 'is-error' : ''}`}>
-                        <p>{item.text}</p>
+                        {item.sender === 'bot' ? (
+                          <StreamingMarkdown
+                            text={item.text}
+                            animate={item.animate}
+                            onStreamTick={() => {
+                              if (chatScrollRef.current) {
+                                chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+                              }
+                            }}
+                          />
+                        ) : (
+                          <p>{item.text}</p>
+                        )}
                         {item.run?.preview && item.run.status !== 'error' && (
                           <div className="wa-card">
                             {Object.entries(item.run.preview).map(([k, v]) => (
@@ -722,6 +737,13 @@ function App() {
                     </div>
                   ))
                 )}
+                {running && (
+                  <div className="wa-row bot">
+                    <div className="wa-bubble bot wa-typing" aria-label="El bot está escribiendo">
+                      <span className="wa-dot"/><span className="wa-dot"/><span className="wa-dot"/>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <form className="wa-composer" onSubmit={e => { e.preventDefault(); execute(); }}>
@@ -752,7 +774,7 @@ function App() {
                       <strong>{displayStatus(run.status)}</strong>
                       <span>{run.used_llm ? `OpenRouter (${run.llm_model})` : run.mode === 'showcase' ? 'Motor local' : run.mode === 'demo' ? 'Demostración local' : 'IA en vivo'}</span>
                     </div>
-                    {run.reply && <p>{run.reply}</p>}
+                    {run.reply && renderMarkdownBlocks(run.reply)}
                     {run.preview && run.status !== 'error' && (
                       <div className="preview">
                         <strong>{runPresentation(run.status).confirm ? 'Revisar antes de guardar' : 'Registro completado'}</strong>
