@@ -27,8 +27,8 @@ type RunRequest = {
 };
 type SavedWorkflow = { id: string; name: string; nodes: FlowNode[]; edges: FlowEdge[] };
 
-const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v2';
-const DOCUMENTS_KEY = 'nodaly.showcase.documents.v1';
+const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v3';
+const DOCUMENTS_KEY = 'nodaly.showcase.documents.v2';
 const RECORDS_KEY = 'nodaly.showcase.records.v1';
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -129,16 +129,16 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-1-cotizaciones',
     name: '1. Cotizador Mesas de Dulces (Sandra)',
     nodes: [
-      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Instagram / WhatsApp', config: {} } },
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'WhatsApp / Telegram', config: {} } },
       {
         id: 'knowledge',
         type: 'knowledge',
         position: { x: 300, y: 250 },
         data: {
-          label: 'Catálogo Sandra (Excel)',
+          label: 'Catálogo Excel + Manual MD',
           config: {
-            text: 'Notas: Precios sujetos a disponibilidad de fecha. Anticipo del 50% para apartar.',
-            document_ids: ['sample-sandra-xlsx'],
+            text: 'Regla comercial: Incluye siempre código de paquete, desglose, descuento por volumen si aplica y monto de anticipo (50%).',
+            document_ids: ['sample-sandra-xlsx', 'sample-sandra-md'],
           },
         },
       },
@@ -151,7 +151,7 @@ function createSampleWorkflows(): SavedWorkflow[] {
           config: {
             mode: 'answer',
             model: 'openai/gpt-4o-mini',
-            instructions: 'Atiende como asistente de Sandra Díaz (Mesas de Dulces). ANTES de entregar una cotización final, si el cliente aún no ha dicho su nombre en la conversación, pregúntale su nombre amablemente. Cuando ya tengas su nombre y lo que desea, genera la cotización desglosada con el total y despídete indicando que puede descargar su copia en PDF.',
+            instructions: 'Eres el asesor comercial de Mesas de Dulces Sandra. Usa el catálogo Excel para precios/códigos y el Manual Operativo (.md) para reglas de negocio: 1) Si el cliente aún no ha dicho su nombre en la conversación, pregúntaselo amablemente antes de cerrar la cotización final (puedes darle un rango de precios si pregunta). 2) Si el subtotal de paquetes/extras supera $4,500 MXN, aplica automáticamente el 10% de descuento (sin descontar envío). 3) Desglosa cada concepto, subtotal, descuento, envío según zona CDMX/Área Metropolitana, Total y Anticipo del 50%. 4) Indica que puede descargar su cotización en PDF.',
           },
         },
       },
@@ -178,7 +178,7 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-2-gastos-obra',
     name: '2. Control de Obra y Gastos (Julio)',
     nodes: [
-      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'WhatsApp Residente', config: {} } },
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'WhatsApp / Telegram Obra', config: {} } },
       {
         id: 'agent',
         type: 'agent',
@@ -187,7 +187,8 @@ function createSampleWorkflows(): SavedWorkflow[] {
           label: 'Extractor de Gastos',
           config: {
             mode: 'extract',
-            instructions: 'Extrae concepto, categoría y monto de gastos de obra, acero o administración.',
+            model: 'openai/gpt-4o-mini',
+            instructions: 'Extrae fecha, concepto detallado, categoría (food, transport, supplies, utilities u other) e importe exacto de gastos de obra, materiales, fletes o viáticos.',
           },
         },
       },
@@ -201,7 +202,7 @@ function createSampleWorkflows(): SavedWorkflow[] {
           config: { format: 'xlsx', filename: 'gasto-obra-julio', title: 'Comprobante de Gasto de Obra' },
         },
       },
-      { id: 'reply', type: 'reply', position: { x: 960, y: 80 }, data: { label: 'Confirmar registro', config: { template: '' } } },
+      { id: 'reply', type: 'reply', position: { x: 960, y: 80 }, data: { label: 'Confirmar registro', config: { template: '✅ Gasto de obra guardado:\n• Concepto: {concept}\n• Categoría: {category}\n• Importe: ${amount} MXN\n• Fecha: {date}' } } },
     ],
     edges: [
       { id: 'message-agent', source: 'message', target: 'agent' },
@@ -224,7 +225,7 @@ function createSampleWorkflows(): SavedWorkflow[] {
           label: 'Intérprete de Filtros',
           config: {
             mode: 'query',
-            instructions: 'Interpreta el período y categoría para el corte administrativo del gimnasio.',
+            instructions: 'Interpreta el período (hoy, semana, mes, todo) y la categoría solicitada para generar el corte administrativo y exportarlo a Excel.',
           },
         },
       },
@@ -254,17 +255,17 @@ function createSampleWorkflows(): SavedWorkflow[] {
     id: 'fepi-4-soporte-cursos',
     name: '4. Soporte y Consulta de Registros (Fernando)',
     nodes: [
-      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Ticket WhatsApp', config: {} } },
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Ticket WhatsApp / Telegram', config: {} } },
       { id: 'query', type: 'query', position: { x: 300, y: 80 }, data: { label: 'Leer tabla guardada', config: { collection: 'expenses', period: 'all', category: '' } } },
       {
         id: 'knowledge',
         type: 'knowledge',
         position: { x: 520, y: 250 },
         data: {
-          label: 'Guía Plataforma (PDF)',
+          label: 'Guía PDF + Playbook SLA MD',
           config: {
-            text: 'Regla: Si es problema de pago o acceso empresarial, indicar escalamiento a Soporte Técnico.',
-            document_ids: ['sample-soporte-pdf'],
+            text: 'Protocolo obligatorio: Todo ticket debe clasificarse por severidad (S1, S2 o S3) antes de dar los pasos de solución.',
+            document_ids: ['sample-soporte-pdf', 'sample-soporte-md'],
           },
         },
       },
@@ -273,11 +274,11 @@ function createSampleWorkflows(): SavedWorkflow[] {
         type: 'agent',
         position: { x: 520, y: 80 },
         data: {
-          label: 'Asistente IA (Guía + Tabla)',
+          label: 'Asistente IA (Guía + SLA + Tabla)',
           config: {
             mode: 'answer',
             model: 'openai/gpt-4o-mini',
-            instructions: 'Atiende como mesa de soporte y asistente administrativo. Tienes acceso tanto a la guía de soporte como a la tabla de registros guardados. Responde dudas de la plataforma o preguntas sobre los registros guardados con pasos y datos claros.',
+            instructions: 'Eres el coordinador de soporte técnico y control administrativo. Tienes acceso simultáneo a: 1) Guía de Soporte (PDF), 2) Playbook de Severidad y SLA (Markdown) y 3) La tabla de registros guardados en vivo. Clasifica cada caso (S1 Crítico <1h, S2 Operativo <4h, S3 Consulta Inmediata), da pasos accionables y si preguntan por registros o gastos guardados, responde con los datos exactos de la tabla.',
           },
         },
       },
@@ -291,7 +292,111 @@ function createSampleWorkflows(): SavedWorkflow[] {
     ],
   };
 
-  return [fepi1, fepi2, fepi3, fepi4];
+  const fepi5: SavedWorkflow = {
+    id: 'fepi-5-registro-clientes',
+    name: '5. Registro CRM de Clientes y Pedidos (Tabla Dinámica)',
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Recibir mensaje', config: {} } },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 300, y: 80 },
+        data: {
+          label: 'Extractor CRM IA',
+          config: {
+            mode: 'extract',
+            model: 'openai/gpt-4o-mini',
+            instructions: 'Extrae con precisión los datos de un cliente o pedido en lenguaje natural para guardarlos en la tabla CRM "clientes": nombre completo del cliente, teléfono, servicio o plan contratado, monto numérico y estado (Pagado, Anticipo 50% o Pendiente).',
+          },
+        },
+      },
+      {
+        id: 'register',
+        type: 'register',
+        position: { x: 520, y: 80 },
+        data: {
+          label: 'Tabla Clientes (CRM)',
+          config: { collection: 'clientes', fields: 'cliente, telefono, servicio, monto, estado' },
+        },
+      },
+      {
+        id: 'export',
+        type: 'export',
+        position: { x: 740, y: 80 },
+        data: {
+          label: 'Exportar Ficha (Excel)',
+          config: { format: 'xlsx', filename: 'registro-cliente-crm', title: 'Ficha de Cliente CRM' },
+        },
+      },
+      {
+        id: 'reply',
+        type: 'reply',
+        position: { x: 960, y: 80 },
+        data: {
+          label: 'Confirmar Registro CRM',
+          config: { template: '📋 Cliente registrado en tabla CRM:\n• Cliente: {cliente}\n• Teléfono: {telefono}\n• Servicio: {servicio}\n• Monto: ${monto} MXN\n• Estado: {estado} ({date})' },
+        },
+      },
+    ],
+    edges: [
+      { id: 'message-agent', source: 'message', target: 'agent' },
+      { id: 'agent-register', source: 'agent', target: 'register' },
+      { id: 'register-export', source: 'register', target: 'export' },
+      { id: 'export-reply', source: 'export', target: 'reply' },
+    ],
+  };
+
+  const fepi6: SavedWorkflow = {
+    id: 'fepi-6-asistente-crm',
+    name: '6. Asistente IA con Tabla de Clientes + Manual MD',
+    nodes: [
+      { id: 'message', type: 'message', position: { x: 80, y: 80 }, data: { label: 'Recibir mensaje', config: {} } },
+      {
+        id: 'knowledge',
+        type: 'knowledge',
+        position: { x: 300, y: 250 },
+        data: {
+          label: 'Registros + Manual CRM (.md)',
+          config: {
+            text: 'Usa la tabla de registros guardados como fuente viva de clientes/gastos y crúzala con el Manual CRM en Markdown.',
+            document_ids: ['sample-crm-md'],
+            include_collection: 'all',
+          },
+        },
+      },
+      {
+        id: 'agent',
+        type: 'agent',
+        position: { x: 300, y: 80 },
+        data: {
+          label: 'Analista CRM IA',
+          config: {
+            mode: 'answer',
+            model: 'openai/gpt-4o-mini',
+            instructions: 'Eres el asistente ejecutivo del CRM de Nodaly. Tienes conectada en vivo la base de datos de registros guardados (clientes, pedidos, gastos) junto con el Manual de Servicios y Reglas de Seguimiento (.md). Responde con cifras exactas, lista los clientes o registros encontrados, aplica las reglas de seguimiento según su estado (Pagado / Anticipo 50% / Pendiente) y cita tus fuentes.',
+          },
+        },
+      },
+      {
+        id: 'export',
+        type: 'export',
+        position: { x: 520, y: 80 },
+        data: {
+          label: 'Exportar Informe (PDF)',
+          config: { format: 'pdf', filename: 'informe-crm-nodaly', title: 'Informe Ejecutivo CRM — Nodaly' },
+        },
+      },
+      { id: 'reply', type: 'reply', position: { x: 740, y: 80 }, data: { label: 'Responder', config: { template: '' } } },
+    ],
+    edges: [
+      { id: 'message-agent', source: 'message', target: 'agent' },
+      { id: 'knowledge-agent', source: 'knowledge', target: 'agent' },
+      { id: 'agent-export', source: 'agent', target: 'export' },
+      { id: 'export-reply', source: 'export', target: 'reply' },
+    ],
+  };
+
+  return [fepi1, fepi2, fepi3, fepi4, fepi5, fepi6];
 }
 
 export function createDemo() {

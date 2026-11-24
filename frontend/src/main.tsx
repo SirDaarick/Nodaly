@@ -468,16 +468,20 @@ function App() {
   const activeAgentMode = String(nodes.find(n => n.type === 'agent')?.data.config?.mode ?? 'answer');
   const lowerFlowName = name.toLowerCase();
   const quickPrompts = lowerFlowName.includes('dulces') || lowerFlowName.includes('sandra')
-    ? ['Hola, quiero cotizar una mesa clásica con exhibidores', 'Soy Laura, cotízame 1 mesa clásica + exhibidores + envío', 'Soy Carlos, mesa premium + 20 bolsas personalizadas']
+    ? ['Hola, quiero cotizar una mesa premium con arco de globos', 'Soy Laura, cotízame 1 mesa premium + arco de globos + envío', 'Soy Carlos, mesa imperial + 20 bolsas personalizadas']
     : lowerFlowName.includes('evogym') || lowerFlowName.includes('gimnasio')
       ? ['Muestra todos los gastos', 'Gastos de hoy en insumos', 'Corte de alimentación']
       : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
-        ? ['¿Qué gastos tenemos registrados en la tabla?', '¿Cómo descargo mi constancia?', 'Tengo un problema de pago empresarial']
-        : activeAgentMode === 'extract'
-          ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
-          : activeAgentMode === 'query'
-            ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
-            : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué productos están agotados?'];
+        ? ['¿Qué gastos tenemos registrados en la tabla?', 'Tengo un bloqueo masivo de SSO empresarial en mi cuenta', '¿Cómo descargo mi constancia DC-3?']
+        : lowerFlowName.includes('registro crm') || lowerFlowName.includes('clientes y pedidos')
+          ? ['cliente: Sofía Ramírez, telefono: 5544332211, servicio: Plan Anual VIP, monto: 4200, estado: Pagado', 'cliente: Constructora Delta, telefono: 5588990011, servicio: Implementación IA, monto: 18500, estado: Anticipo 50%', 'cliente: Marco Polo, telefono: 5511223344, servicio: Consultoría Express, monto: 2400, estado: Pendiente']
+          : lowerFlowName.includes('asistente ia con tabla') || lowerFlowName.includes('asistente crm')
+            ? ['¿Qué registros y clientes tenemos guardados en la tabla?', '¿Qué incluye el Plan Anual VIP y cuál es su garantía según el manual?', 'Haz un resumen de los registros guardados con sus montos']
+            : activeAgentMode === 'extract'
+              ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
+              : activeAgentMode === 'query'
+                ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
+                : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué promociones tienen y qué productos están agotados?'];
 
   const displayed: Node[] = nodes.map(n => { const m = meta(n.type); const step = run?.steps.find(s => s.node_id === n.id); return {id:n.id, type:'default', position:n.position, measured:measurements[n.id], sourcePosition:Position.Right, targetPosition:Position.Left, data:{label:<div className="flow-node"><span className={`node-icon ${m.color}`}>{m.icon}</span><span className="node-copy"><strong>{displayLabel(n.data.label)}</strong><small>{step ? displayStatus(step.status) : m.description}</small></span><span className={`node-status ${step?.status || ''}`}>{step ? (step.status === 'completed' ? '✓' : '!') : '·'}</span></div>}, className:`canvas-node ${selected === n.id ? 'is-selected' : ''} ${running ? 'is-running' : ''}`}; });
   return <div className="app-shell">

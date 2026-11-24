@@ -45,7 +45,8 @@
           "label": "Agente de IA",
           "config": {
             "mode": "answer",
-            "instructions": ""
+            "model": "openai/gpt-4o-mini",
+            "instructions": "Eres el mesero digital de Taquería La Esquina. Cruza siempre el Menú (PDF) con el Inventario en tiempo real (Excel): 1) Confirma precios exactos en MXN. 2) Si un producto está 'Agotado' (como Refresco 355ml), indícalo claramente y sugiere una alternativa disponible (ej. Agua de horchata). 3) Si un producto tiene 'Bajo stock', avisa cuántas piezas quedan. 4) Menciona envío gratis arriba de $250 MXN cuando aplique."
           }
         }
       },
