@@ -129,6 +129,12 @@ def db():
             template('fepi-6-asistente-crm','6. Asistente IA con Tabla de Clientes + Manual MD','Usa todas las tablas guardadas + Manual CRM (.md) como base de conocimiento.',['message','knowledge','agent','export','reply'],{'knowledge':{'text':'Usa la tabla de registros guardados como fuente viva de clientes/gastos y crúzala con el Manual CRM en Markdown.','document_ids':['sample-crm-md'],'include_collection':'all'},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Eres el asistente ejecutivo del CRM de Nodaly. Tienes conectada en vivo la base de datos de registros guardados junto con el Manual de Servicios (.md). Responde con cifras exactas, lista los clientes o registros encontrados, aplica las reglas de seguimiento según su estado y cita tus fuentes.'},'export':{'format':'pdf','filename':'informe-crm-nodaly','title':'Informe Ejecutivo CRM — Nodaly'},'reply':{'template':''}},'¿Qué registros y clientes tenemos guardados en la tabla?'),
         ]
         c.executemany('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_v4])
+    if c.execute("INSERT OR IGNORE INTO metadata VALUES('seeded_fepi_v5')").rowcount:
+        fepi_v5=[
+            template('fepi-1-cotizaciones','1. Cotizador Mesas de Dulces (Sandra)','Conversa sin exportar, confirma la cotización al cerrar el pedido y luego genera PDF.',['message','knowledge','agent','register','export','reply'],{'knowledge':{'text':'Regla comercial: Incluye siempre código de paquete, desglose, descuento por volumen si aplica y monto de anticipo (50%).','document_ids':['sample-sandra-xlsx','sample-sandra-md']},'agent':{'mode':'answer','model':'openai/gpt-4o-mini','instructions':'Eres el asesor comercial de Mesas de Dulces Sandra. Usa el catálogo Excel para precios/códigos y el Manual Operativo (.md) para reglas de negocio: 1) Si el cliente aún no ha dicho su nombre, pregúntaselo antes de cerrar la cotización final. 2) Si el subtotal supera $4,500 MXN, aplica 10% de descuento. 3) Desglosa subtotal, descuento, envío, Total y Anticipo 50%. 4) Cuando el cliente confirme su cotización, se guardará en tabla y se generará su PDF.'},'register':{'collection':'cotizaciones','fields':'cliente, paquetes, total, anticipo'},'export':{'format':'pdf','filename':'cotizacion-sandra','title':'Cotización — Mesas de Dulces Sandra','trigger_mode':'auto'},'reply':{'template':''}},'Soy Laura, cotízame 1 mesa premium + arco de globos + envío'),
+            template('fepi-2-gastos-obra','2. Control de Obra y Gastos (Julio)','Acumula gastos en tabla y genera el corte en Excel cuando lo pidas.',['message','agent','register','query','report','export','reply'],{'agent':{'mode':'extract','model':'openai/gpt-4o-mini','instructions':'Extrae fecha, concepto detallado, categoría (food, transport, supplies, utilities u other) e importe exacto de gastos de obra, materiales, fletes o viáticos.'},'register':{'collection':'expenses'},'query':{'collection':'expenses','period':'all','category':''},'report':{'amount_field':'amount','group_by':'category','title':'Corte de Obra y Gastos (Julio)'},'export':{'format':'xlsx','filename':'corte-obra-julio','title':'Corte de Obra y Gastos','trigger_mode':'on_cut'},'reply':{'template':''}},'Hoy gasté 850 en soldadura.'),
+        ]
+        c.executemany('INSERT OR REPLACE INTO workflows VALUES(?,?,?,?)',[(f['id'],f['name'],json.dumps(f['nodes']),json.dumps(f['edges'])) for f in fepi_v5])
     c.commit()
     return c
 
@@ -264,7 +270,7 @@ def validate(nodes,edges):
     if any(not isinstance(n,dict) or not isinstance(n.get('id'),str) or not n['id'] or n.get('type') not in ('message','knowledge','agent','reply','register','query','report','export') or not isinstance(n.get('data',{}),dict) or not isinstance(n.get('data',{}).get('config',{}),dict) for n in nodes): fail('Nodo no válido')
     for n in nodes:
         typ=n['type']; cfg=n.get('data',{}).get('config',{})
-        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000,'filename':120,'fields':1000,'collection':100,'telegram_token':200,'telegram_chat_id':100,'include_collection':100,'amount_field':100,'group_by':100}.items():
+        for key,limit in {'instructions':4000,'template':4000,'category':100,'title':200,'text':24000,'filename':120,'fields':1000,'collection':100,'telegram_token':200,'telegram_chat_id':100,'include_collection':100,'amount_field':100,'group_by':100,'trigger_mode':40}.items():
             if key in cfg and (not isinstance(cfg[key],str) or len(cfg[key])>limit): fail('Configuración no válida: '+key)
         if typ=='export' and cfg.get('format','xlsx') not in ('xlsx','pdf'): fail('Formato de exportación no válido')
         if typ=='knowledge' and (not isinstance(cfg.get('document_ids',[]),list) or len(cfg.get('document_ids',[]))>3 or any(not isinstance(d,str) or len(d)>100 for d in cfg.get('document_ids',[]))): fail('La base de conocimiento admite hasta tres documentos')
@@ -304,7 +310,7 @@ def validate(nodes,edges):
         if typ=='report':
             af=str(cfg.get('amount_field','amount')).strip(); gb=str(cfg.get('group_by','category')).strip()
             if not af or len(af)>100 or not gb or len(gb)>100: fail('Configuración de informe no válida')
-        if typ=='register' and (i==0 or by[order[i-1]]['type']!='agent' or by[order[i-1]].get('data',{}).get('config',{}).get('mode')!='extract'): fail('El registro requiere un agente de extracción inmediatamente antes')
+        if typ=='register' and (i==0 or by[order[i-1]]['type']!='agent' or by[order[i-1]].get('data',{}).get('config',{}).get('mode') not in ('extract','answer')): fail('El registro requiere un agente de extracción o respuesta inmediatamente antes')
         if typ=='report' and (i==0 or by[order[i-1]]['type']!='query'): fail('El informe requiere una consulta inmediatamente antes')
     return by,order,contexts
 
@@ -492,6 +498,38 @@ def live_answer(message,sources,instructions,model_override='',history=None):
         return result['choices'][0]['message']['content'], ai_model
     except Exception: raise ValueError('Falló la solicitud al proveedor de IA configurado')
 
+def is_cut_request(message:str)->bool:
+    low=re.sub(r'[áéíóúÁÉÍÓÚ]',lambda m:{'á':'a','é':'e','í':'i','ó':'o','ú':'u','Á':'a','É':'e','Í':'i','Ó':'o','Ú':'u'}[m.group(0)],(message or '').lower())
+    has_cut=bool(re.search(r'\b(corte|reporte|informe|resumen|acumulado|exporta|exportar|descargar|muestra|mostrar|listar|lista|cuanto llevamos|cuanto hemos gastado|total de gastos|todos los gastos|todos los registros)\b',low))
+    has_reg=bool(re.search(r'\b(gaste|pague|compre|registrar|registra)\b|cliente\s*:',low))
+    return has_cut and not has_reg
+
+def extract_quote_from_conversation(message:str,history,reply_text:str,field_names):
+    user_turns='\n'.join([*(str(h.get('content','')) for h in (history or []) if isinstance(h,dict) and h.get('role')=='user'),message])
+    name_m=re.search(r'\b(?:soy|me llamo|mi nombre es|a nombre de|cliente\s*:?)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)',user_turns,re.I)
+    customer=name_m.group(1).strip() if name_m else ''
+    if not customer: return None
+    low_turns=re.sub(r'[áéíóúÁÉÍÓÚ]',lambda m:{'á':'a','é':'e','í':'i','ó':'o','ú':'u','Á':'a','É':'e','Í':'i','Ó':'o','Ú':'u'}[m.group(0)],user_turns.lower())
+    if not re.search(r'\b(mesa|paquete|cotiz|arco|fuente|exhibidor|bolsa|envio|servicio|plan)\b',low_turns): return None
+    amounts=[float(m.group(1).replace(',','')) for m in re.finditer(r'\$\s*([\d,]+(?:\.\d{1,2})?)',reply_text or '')]
+    total_num=max(amounts) if amounts else 0.0
+    total_str=f'{total_num:.2f}' if total_num>0 else '0.00'
+    anticipo_str=f'{total_num/2:.2f}' if total_num>0 else '0.00'
+    clean_pkg=re.sub(r'\b(?:soy|me llamo|mi nombre es|a nombre de)\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?[,.\s]*','',message,flags=re.I)
+    clean_pkg=re.sub(r'\b(?:cotizame|cotízame|quiero|necesito|por favor)\b','',clean_pkg,flags=re.I)
+    clean_pkg=re.sub(r'\s+',' ',clean_pkg).strip() or message.strip()
+    out={}
+    for f in (field_names or ['cliente','paquetes','total','anticipo']):
+        low=f.lower()
+        if low in ('cliente','nombre'): out[f]=customer
+        elif any(w in low for w in ('paquete','concepto','servicio','detalle')): out[f]=clean_pkg[:200]
+        elif low in ('total','monto','importe','amount'): out[f]=total_str
+        elif 'anticipo' in low: out[f]=anticipo_str
+        elif low in ('fecha','date'): out[f]=date.today().isoformat()
+        else: out[f]=clean_pkg[:120]
+    if 'date' not in out: out['date']=date.today().isoformat()
+    return out
+
 def _row_to_export_dict(r):
     if isinstance(r.get('data'),dict):
         return {'Tabla':r.get('collection','registro'),'Fecha':r.get('date',''),**{k:v for k,v in r['data'].items() if k not in ('date','fecha')}}
@@ -501,7 +539,12 @@ def _row_to_export_dict(r):
 def run(body:Run):
     by,order,contexts=validate(body.nodes,body.edges)
     fingerprint=hashlib.sha256(json.dumps({'nodes':body.nodes,'edges':body.edges,'message':body.message},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-    pending=None; pending_collection='expenses'; steps=[]; previous=body.message; last_rows=None; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
+    has_register=any(by[x]['type']=='register' for x in order)
+    reg_node=next((by[x] for x in order if by[x]['type']=='register'),None)
+    reg_col=str(reg_node.get('data',{}).get('config',{}).get('collection','expenses') or 'expenses').strip() if reg_node else 'expenses'
+    cut_mode=has_register and not body.confirm and is_cut_request(body.message)
+    pending=None; pending_collection=reg_col; steps=[]; previous=body.message; last_rows=None; result={'run_id':body.run_id,'status':'completed','mode':mode(),'steps':steps,'reply':''}; sources=[]
+    skip_register_flow=False; agent_reply_text=''; did_commit_single=False
     try:
         for idx,ident in enumerate(order):
             n=by[ident]; typ=n['type']; cfg=n.get('data',{}).get('config',{}); output=previous
@@ -509,7 +552,9 @@ def run(body:Run):
             elif typ=='agent':
                 kind=cfg['mode']; sources=knowledge(contexts[ident],by)
                 for context_id in contexts[ident]: steps.append({'node_id':context_id,'status':'completed','output':{'sources':len(sources)}})
-                if kind=='answer':
+                if cut_mode:
+                    output=filters(body.message)
+                elif kind=='answer':
                     if isinstance(previous,list):
                         table_lines=[format_record_line(r) for r in previous if isinstance(r,dict)]
                         sources.append(('Registros guardados',None,'[Tabla: Registros guardados]\n'+('\n'.join(table_lines) if table_lines else 'No hay registros guardados en este período.')))
@@ -520,6 +565,17 @@ def run(body:Run):
                         result['used_llm']=True
                         result['llm_model']=used_model
                     result['sources']=used
+                    agent_reply_text=str(output)
+                    next_reg=by[order[idx+1]] if idx+1<len(order) and by[order[idx+1]]['type']=='register' else None
+                    if next_reg is not None:
+                        reg_cfg=next_reg.get('data',{}).get('config',{})
+                        field_names=parse_fields_spec(reg_cfg.get('fields') or ['cliente','paquetes','total','anticipo'])
+                        if not body.confirm:
+                            quote_rec=extract_quote_from_conversation(body.message,body.history,agent_reply_text,field_names)
+                            if quote_rec is None:
+                                skip_register_flow=True
+                            else:
+                                output=quote_rec
                 elif kind=='extract':
                     next_reg=by[order[idx+1]] if idx+1<len(order) and by[order[idx+1]]['type']=='register' else None
                     reg_cfg=next_reg.get('data',{}).get('config',{}) if next_reg else {}
@@ -537,6 +593,18 @@ def run(body:Run):
                             output=extract_custom_fields(body.message,field_names)
                 else: output=filters(body.message)
             elif typ=='register':
+                if cut_mode:
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (generando corte acumulado)'})
+                    if not any(by[x]['type']=='query' for x in order[idx+1:]):
+                        queried=query_records({'collection':reg_col,'period':'all','category':''},previous)
+                        last_rows=queried
+                        rep=report(queried,{'title':f'Corte de {reg_col}','amount_field':'amount','group_by':'category'})
+                        result['report']=rep
+                        previous=rep
+                    continue
+                if skip_register_flow:
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (conversación sin pedido confirmado)'})
+                    continue
                 pending_collection=str(cfg.get('collection','expenses') or 'expenses').strip()
                 with db() as c:
                     c.execute('BEGIN IMMEDIATE'); saved=c.execute('SELECT * FROM confirmations WHERE run_id=?',(body.run_id,)).fetchone()
@@ -547,11 +615,28 @@ def run(body:Run):
                     else: output=json.loads(saved['preview'])
                     result['preview']=output
                     if not body.confirm:
+                        if agent_reply_text: result['reply']=agent_reply_text
                         result['status']='awaiting_confirmation'; steps.append({'node_id':ident,'status':'awaiting_confirmation','output':output}); return result
-                    pending=output
-            elif typ=='query': output=query_records(cfg,previous); last_rows=output
-            elif typ=='report': output=report(previous,cfg); result['report']=output
+                    pending=output; did_commit_single=True
+            elif typ=='query':
+                if did_commit_single and not cut_mode and any(by[x]['type']=='report' for x in order[idx+1:]):
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (registro individual guardado)'})
+                    continue
+                output=query_records(cfg,previous); last_rows=output
+            elif typ=='report':
+                if did_commit_single and not cut_mode:
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (registro individual guardado)'})
+                    continue
+                output=report(previous,cfg); result['report']=output
             elif typ=='export':
+                trig=str(cfg.get('trigger_mode','auto') or 'auto')
+                has_report_node=any(by[x]['type']=='report' for x in order)
+                if skip_register_flow:
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (esperando confirmación de cotización/registro)'})
+                    continue
+                if did_commit_single and not cut_mode and (trig=='on_cut' or (trig=='auto' and has_report_node)):
+                    steps.append({'node_id':ident,'status':'skipped','output':'Omitido (se exporta al pedir el corte)'})
+                    continue
                 fmt=cfg.get('format','xlsx'); fname=(cfg.get('filename') or 'reporte-nodaly').strip() or 'reporte-nodaly'
                 if isinstance(previous,list):
                     exp_rows=[_row_to_export_dict(r) for r in previous if isinstance(r,dict)]
@@ -579,7 +664,7 @@ def run(body:Run):
             elif typ=='reply':
                 template=cfg.get('template','')
                 if not isinstance(template,str) or len(template)>4000: raise ValueError('Plantilla de respuesta no válida')
-                if template:
+                if template and not cut_mode:
                     values=previous if isinstance(previous,dict) else {'output':str(previous)}
                     output=re.sub(r'\{([a-zA-Z0-9_áéíóúÁÉÍÓÚñÑ]+)\}',lambda m:str(values.get(m.group(1),m.group(0))),template)
                 elif isinstance(previous,dict) and 'amount' in previous and 'concept' in previous:

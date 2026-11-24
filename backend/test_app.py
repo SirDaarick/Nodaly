@@ -230,4 +230,38 @@ class API(unittest.TestCase):
             self.assertEqual(len(p['processed']),1)
             self.assertIn('Nodaly',p['processed'][0]['reply'])
 
+    def test_phase_gated_quote_and_on_demand_cut_flows(self):
+        flows={w['id']:w for w in self.c.get('/api/workflows').json()}
+        sandra=flows['fepi-1-cotizaciones']
+        # 1) Casual question should NOT trigger register or export_file
+        casual=self.c.post('/api/run',json={**sandra,'message':'Hola, ¿qué paquetes tienen?','run_id':'sandra-casual','confirm':False}).json()
+        self.assertEqual(casual['status'],'completed')
+        self.assertIsNone(casual.get('preview'))
+        self.assertIsNone(casual.get('export_file'))
+
+        # 2) Customer name + package -> awaiting_confirmation, still no export_file
+        ready=self.c.post('/api/run',json={**sandra,'message':'Soy Laura, cotízame 1 mesa clásica','run_id':'sandra-ready','confirm':False}).json()
+        self.assertEqual(ready['status'],'awaiting_confirmation')
+        self.assertEqual(ready['preview']['cliente'],'Laura')
+        self.assertIsNone(ready.get('export_file'))
+
+        # 3) Confirming saves to cotizaciones and exports PDF
+        confirmed=self.c.post('/api/run',json={**sandra,'message':'Soy Laura, cotízame 1 mesa clásica','run_id':'sandra-ready','confirm':True}).json()
+        self.assertEqual(confirmed['status'],'completed')
+        self.assertEqual(confirmed['export_file']['format'],'pdf')
+        self.assertEqual(len(self.c.get('/api/records?collection=cotizaciones').json()),1)
+
+        # 4) Gastos de obra: single expense confirm saves WITHOUT exporting; cut request exports all
+        julio=flows['fepi-2-gastos-obra']
+        g1=self.c.post('/api/run',json={**julio,'message':'Hoy gasté 850 en soldadura','run_id':'julio-g1','confirm':False}).json()
+        self.assertEqual(g1['status'],'awaiting_confirmation')
+        g1_ok=self.c.post('/api/run',json={**julio,'message':'Hoy gasté 850 en soldadura','run_id':'julio-g1','confirm':True}).json()
+        self.assertEqual(g1_ok['status'],'completed')
+        self.assertIsNone(g1_ok.get('export_file'))
+
+        cut=self.c.post('/api/run',json={**julio,'message':'Hazme el corte de todos los gastos','run_id':'julio-cut','confirm':False}).json()
+        self.assertEqual(cut['status'],'completed')
+        self.assertEqual(cut['export_file']['format'],'xlsx')
+        self.assertEqual(cut['report']['count'],3)
+
 if __name__ == '__main__': unittest.main()

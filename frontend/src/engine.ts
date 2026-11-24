@@ -427,6 +427,61 @@ export function parseFieldsSpec(raw: unknown): string[] {
   return out;
 }
 
+export function isCutRequest(message: string): boolean {
+  const norm = normalizeText(message);
+  const hasCutVerb = /\b(corte|reporte|informe|resumen|acumulado|exporta|exportar|descargar|muestra|mostrar|listar|lista|cuanto llevamos|cuanto hemos gastado|total de gastos|todos los gastos|todos los registros)\b/.test(norm);
+  const hasRegisterVerb = /\b(gaste|pague|compre|registrar|registra)\b|cliente\s*:/.test(norm);
+  return hasCutVerb && !hasRegisterVerb;
+}
+
+export function extractQuoteFromConversation(
+  message: string,
+  history: { role: string; content: string }[] = [],
+  replyText: string,
+  fieldNames: string[] = ['cliente', 'paquetes', 'total', 'anticipo'],
+): Record<string, string> | null {
+  const userTurns = [
+    ...history.filter((h) => h.role === 'user').map((h) => h.content),
+    message,
+  ].join('\n');
+
+  const nameMatch =
+    userTurns.match(/\b(?:soy|me llamo|mi nombre es|a nombre de|cliente\s*:?)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)/i);
+  const customerName = nameMatch?.[1]?.trim() ?? '';
+  if (!customerName) return null;
+
+  const normMsg = normalizeText(userTurns);
+  const hasPackageIntent = /\b(mesa|paquete|cotiz|arco|fuente|exhibidor|bolsa|envio|servicio|plan)\b/.test(normMsg);
+  if (!hasPackageIntent) return null;
+
+  // Extract dollar/MXN amounts from replyText or userTurns.
+  const priceMatches = [...replyText.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
+    .map((m) => Number(m[1].replace(/,/g, '')))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const totalNum = priceMatches.length ? Math.max(...priceMatches) : 0;
+  const totalStr = totalNum > 0 ? totalNum.toFixed(2) : '0.00';
+  const anticipoStr = totalNum > 0 ? (totalNum / 2).toFixed(2) : '0.00';
+
+  const cleanPackages = message
+    .replace(/\b(?:soy|me llamo|mi nombre es|a nombre de)\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?[,.\s]*/gi, '')
+    .replace(/\b(?:cotizame|cotízame|quiero|necesito|por favor)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim() || message.trim();
+
+  const out: Record<string, string> = {};
+  for (const f of fieldNames) {
+    const low = f.toLowerCase();
+    if (low === 'cliente' || low === 'nombre') out[f] = customerName;
+    else if (low.includes('paquete') || low.includes('concepto') || low.includes('servicio') || low.includes('detalle')) out[f] = cleanPackages.slice(0, 200);
+    else if (low === 'total' || low === 'monto' || low === 'importe' || low === 'amount') out[f] = totalStr;
+    else if (low.includes('anticipo')) out[f] = anticipoStr;
+    else if (low === 'fecha' || low === 'date') out[f] = new Date().toISOString().slice(0, 10);
+    else out[f] = cleanPackages.slice(0, 120);
+  }
+  if (!('date' in out)) out.date = new Date().toISOString().slice(0, 10);
+  return out;
+}
+
 export function formatRecordSummaryLine(r: ExpenseRecord): string {
   if (r.data && Object.keys(r.data).length > 0) {
     const col = r.collection || 'registro';

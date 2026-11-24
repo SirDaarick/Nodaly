@@ -90,4 +90,53 @@ describe('browser showcase', () => {
     expect(ferRes.status).toBe('completed');
     expect(ferRes.sources?.some((s) => s.name === 'Registros guardados')).toBe(true);
   });
+
+  it('gates quote export behind confirmation and runs expense cuts only on cut request', async () => {
+    const api = createDemo();
+    const workflows = await api('/workflows') as { id: string; nodes: unknown[]; edges: unknown[] }[];
+
+    const sandra = workflows.find((w) => w.id === 'fepi-1-cotizaciones')!;
+    const casual = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...sandra, message: 'Hola, ¿qué mesas tienen?', run_id: 'sandra-q', confirm: false }),
+    }) as { status: string; preview?: unknown; export_file?: unknown };
+    expect(casual.status).toBe('completed');
+    expect(casual.preview).toBeUndefined();
+    expect(casual.export_file).toBeUndefined();
+
+    const ready = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...sandra, message: 'Soy Laura, cotízame 1 mesa clásica', run_id: 'sandra-c', confirm: false }),
+    }) as { status: string; preview?: Record<string, string>; export_file?: unknown };
+    expect(ready.status).toBe('awaiting_confirmation');
+    expect(ready.preview?.cliente).toBe('Laura');
+    expect(ready.export_file).toBeUndefined();
+
+    const confirmed = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...sandra, message: 'Soy Laura, cotízame 1 mesa clásica', run_id: 'sandra-c', confirm: true }),
+    }) as { status: string; export_file?: { format: string } };
+    expect(confirmed.status).toBe('completed');
+    expect(confirmed.export_file?.format).toBe('pdf');
+
+    const julio = workflows.find((w) => w.id === 'fepi-2-gastos-obra')!;
+    await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...julio, message: 'Hoy gasté 850 en soldadura', run_id: 'julio-1', confirm: false }),
+    });
+    const saved = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...julio, message: 'Hoy gasté 850 en soldadura', run_id: 'julio-1', confirm: true }),
+    }) as { status: string; export_file?: unknown };
+    expect(saved.status).toBe('completed');
+    expect(saved.export_file).toBeUndefined();
+
+    const cut = await api('/run', {
+      method: 'POST',
+      body: JSON.stringify({ ...julio, message: 'Hazme el corte de todos los gastos', run_id: 'julio-cut', confirm: false }),
+    }) as { status: string; export_file?: { format: string }; report?: { count: number } };
+    expect(cut.status).toBe('completed');
+    expect(cut.export_file?.format).toBe('xlsx');
+    expect(cut.report?.count).toBeGreaterThanOrEqual(3);
+  });
 });

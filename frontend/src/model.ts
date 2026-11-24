@@ -48,7 +48,7 @@ const labels: Record<string, string> = {
   'Expense registration': 'Registro de gastos', 'Expense report': 'Informe de gastos',
   'Expenses': 'Gastos', 'Pasted text': 'Texto pegado', 'Untitled workflow': 'Flujo sin título',
 };
-const statuses: Record<string, string> = { completed: 'Completado', error: 'Error', awaiting_confirmation: 'Pendiente de confirmación' };
+const statuses: Record<string, string> = { completed: 'Completado', error: 'Error', awaiting_confirmation: 'Pendiente de confirmación', skipped: 'Omitido en este turno' };
 const categories: Record<string, string> = { food: 'Alimentación', transport: 'Transporte', supplies: 'Insumos', utilities: 'Servicios', other: 'Otros' };
 const fields: Record<string, string> = { date: 'Fecha', concept: 'Concepto', category: 'Categoría', amount: 'Importe', sources: 'Fuentes', count: 'Cantidad', total: 'Total', groups: 'Grupos', title: 'Título', period: 'Período', id: 'Identificador', format: 'Formato', filename: 'Archivo', rows: 'Filas' };
 const periods: Record<string, string> = { all: 'Todo el tiempo', today: 'Hoy', week: 'Esta semana', month: 'Este mes' };

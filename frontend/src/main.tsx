@@ -263,12 +263,13 @@ function App() {
       if (confirm && result.status === 'completed') {
         await refreshRecords();
         if (result.preview) {
+          const isQuote = name.toLowerCase().includes('dulces') || name.toLowerCase().includes('sandra') || 'cliente' in result.preview;
           pushNotification({
-            kind: 'Gasto de obra',
+            kind: isQuote ? 'Cotización' : 'Gasto de obra',
             flowName: name,
-            customerOrCategory: displayCategory(String(result.preview.category || 'other')),
-            summary: String(result.preview.concept || activeMessage),
-            amount: `$${String(result.preview.amount || '0.00')}`,
+            customerOrCategory: String(result.preview.cliente || displayCategory(String(result.preview.category || 'other'))),
+            summary: String(result.preview.paquetes || result.preview.concept || activeMessage),
+            amount: `$${String(result.preview.total || result.preview.amount || result.preview.monto || '0.00')}`,
           });
         }
       }
@@ -276,20 +277,10 @@ function App() {
       const botText = result.status === 'error'
         ? (result.error || 'Ocurrió un error al ejecutar el flujo.')
         : result.status === 'awaiting_confirmation'
-          ? 'Encontré estos datos. Revisa la vista previa y confírmala para guardar el registro:'
+          ? (result.reply ? `${result.reply}\n\nRevisa la vista previa y confírmala para guardar el registro:` : 'Encontré estos datos. Revisa la vista previa y confírmala para guardar el registro:')
           : (result.reply || 'Flujo ejecutado.');
 
-      const isQuoteFlow = (name.toLowerCase().includes('dulces') || name.toLowerCase().includes('sandra')) && result.status === 'completed' && botText.includes('$');
-      if (isQuoteFlow) {
-        const totalMatch = botText.match(/\$[\d,]+(?:\.\d{2})?/g);
-        pushNotification({
-          kind: 'Cotización',
-          flowName: name,
-          customerOrCategory: 'Cliente WhatsApp',
-          summary: botText.slice(0, 140) + (botText.length > 140 ? '…' : ''),
-          amount: totalMatch ? totalMatch[totalMatch.length - 1] : 'Cotizado',
-        });
-      }
+      const isQuoteFlow = confirm && result.status === 'completed' && (name.toLowerCase().includes('dulces') || name.toLowerCase().includes('sandra'));
 
       setChatHistory(prev => [
         ...prev,
@@ -468,7 +459,7 @@ function App() {
   const activeAgentMode = String(nodes.find(n => n.type === 'agent')?.data.config?.mode ?? 'answer');
   const lowerFlowName = name.toLowerCase();
   const quickPrompts = lowerFlowName.includes('dulces') || lowerFlowName.includes('sandra')
-    ? ['Hola, quiero cotizar una mesa premium con arco de globos', 'Soy Laura, cotízame 1 mesa premium + arco de globos + envío', 'Soy Carlos, mesa imperial + 20 bolsas personalizadas']
+    ? ['Hola, ¿qué paquetes de mesas tienen y qué incluyen?', 'Soy Laura, cotízame 1 mesa premium + arco de globos + envío CDMX', 'Soy Carlos, quiero 1 mesa imperial + fuente de chocolate']
     : lowerFlowName.includes('evogym') || lowerFlowName.includes('gimnasio')
       ? ['Muestra todos los gastos', 'Gastos de hoy en insumos', 'Corte de alimentación']
       : lowerFlowName.includes('soporte') || lowerFlowName.includes('fernando') || lowerFlowName.includes('cursos')
@@ -478,7 +469,7 @@ function App() {
           : lowerFlowName.includes('asistente ia con tabla') || lowerFlowName.includes('asistente crm')
             ? ['¿Qué registros y clientes tenemos guardados en la tabla?', '¿Qué incluye el Plan Anual VIP y cuál es su garantía según el manual?', 'Haz un resumen de los registros guardados con sus montos']
             : activeAgentMode === 'extract'
-              ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', '2026-11-19 cemento e insumos 1450 pesos']
+              ? ['Hoy gasté 850 en soldadura', 'Ayer pagué $320 de transporte de acero', 'Hazme el corte de todos los gastos y exporta el Excel']
               : activeAgentMode === 'query'
                 ? ['Muestra todos los gastos', 'Gastos de hoy en alimentación', 'Corte de insumos']
                 : ['¿Qué tacos tienen y cuánto cuestan?', '¿Hay refresco en inventario?', '¿Qué promociones tienen y qué productos están agotados?'];
@@ -717,22 +708,6 @@ function App() {
                                 }}
                               >
                                 <Download size={11}/> {item.run.export_file.format === 'xlsx' ? `Descargar Excel (${item.run.export_file.filename}.xlsx)` : `Descargar PDF (${item.run.export_file.filename}.pdf)`}
-                              </button>
-                            )}
-                            {!item.run.export_file && (item.isQuote || (item.run.preview && item.run.status === 'completed')) && (
-                              <button
-                                type="button"
-                                className="wa-doc-btn"
-                                onClick={() => exportPrintPdf(
-                                  item.isQuote ? 'Cotización — Mesas de Dulces Sandra' : 'Comprobante de Gasto de Obra',
-                                  `Generado a las ${item.time} desde ${name}`,
-                                  item.run?.preview
-                                    ? Object.entries(item.run.preview).map(([k, v]) => ({ label: displayField(k), value: k === 'category' ? displayCategory(String(v)) : String(v) }))
-                                    : [{ label: 'Flujo', value: name }],
-                                  item.text,
-                                )}
-                              >
-                                <Download size={11}/> Descargar copia (PDF)
                               </button>
                             )}
                             {!!item.run.sources?.length && (
@@ -1093,7 +1068,19 @@ function Settings({node, docs, records, nodes, update, upload, inspectDoc, remov
     </label>
     <p className="field-help">Puedes consultar cualquier tabla y conectarla a un Agente IA para usar sus datos como base de conocimiento.</p>
   </>;
-  if (node.type === 'export') return <><label>Formato de exportación<select value={value('format') || 'xlsx'} onChange={e=>update('format',e.target.value)}><option value="xlsx">Excel (.xlsx)</option><option value="pdf">Documento PDF</option></select></label><label>Nombre del archivo<input value={value('filename')} onChange={e=>update('filename',e.target.value)} placeholder="reporte-nodaly"/></label><label>Título del documento<input value={value('title')} onChange={e=>update('title',e.target.value)} placeholder="Reporte Nodaly"/></label><div className="hint"><strong>Descarga directa en el chat</strong><p>Al ejecutarse este nodo, aparece un botón en el simulador para descargar el archivo con los datos del paso anterior.</p></div></>;
+  if (node.type === 'export') return <>
+    <label>Formato de exportación<select value={value('format') || 'xlsx'} onChange={e=>update('format',e.target.value)}><option value="xlsx">Excel (.xlsx)</option><option value="pdf">Documento PDF</option></select></label>
+    <label>Cuándo generar el archivo
+      <select value={value('trigger_mode') || 'auto'} onChange={e=>update('trigger_mode',e.target.value)}>
+        <option value="auto">Al confirmar cotización o al pedir el corte</option>
+        <option value="on_cut">Solo cuando se pida el corte / reporte</option>
+        <option value="always">En cada ejecución confirmada</option>
+      </select>
+    </label>
+    <label>Nombre del archivo<input value={value('filename')} onChange={e=>update('filename',e.target.value)} placeholder="reporte-nodaly"/></label>
+    <label>Título del documento<input value={value('title')} onChange={e=>update('title',e.target.value)} placeholder="Reporte Nodaly"/></label>
+    <div className="hint"><strong>Exportación controlada</strong><p>El archivo se genera solo cuando se confirma el registro/cotización o cuando pides el corte acumulado.</p></div>
+  </>;
   return <>
     <label>Título del informe<input value={displayLabel(value('title'))} onChange={e=>update('title',e.target.value)}/></label>
     <label>Campo numérico a sumar<input value={value('amount_field') || 'amount'} onChange={e=>update('amount_field',e.target.value)} placeholder="amount, monto, total…"/></label>

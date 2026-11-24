@@ -7,7 +7,9 @@ import {
   extractCustomRecord,
   extractExpense,
   extractFilters,
+  extractQuoteFromConversation,
   formatRecordSummaryLine,
+  isCutRequest,
   parseFieldsSpec,
   queryExpenseRecords,
   type ExpenseRecord,
@@ -27,7 +29,7 @@ type RunRequest = {
 };
 type SavedWorkflow = { id: string; name: string; nodes: FlowNode[]; edges: FlowEdge[] };
 
-const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v3';
+const WORKFLOWS_KEY = 'nodaly.showcase.workflows.v4';
 const DOCUMENTS_KEY = 'nodaly.showcase.documents.v2';
 const RECORDS_KEY = 'nodaly.showcase.records.v1';
 const today = () => new Date().toISOString().slice(0, 10);
@@ -151,25 +153,35 @@ function createSampleWorkflows(): SavedWorkflow[] {
           config: {
             mode: 'answer',
             model: 'openai/gpt-4o-mini',
-            instructions: 'Eres el asesor comercial de Mesas de Dulces Sandra. Usa el catálogo Excel para precios/códigos y el Manual Operativo (.md) para reglas de negocio: 1) Si el cliente aún no ha dicho su nombre en la conversación, pregúntaselo amablemente antes de cerrar la cotización final (puedes darle un rango de precios si pregunta). 2) Si el subtotal de paquetes/extras supera $4,500 MXN, aplica automáticamente el 10% de descuento (sin descontar envío). 3) Desglosa cada concepto, subtotal, descuento, envío según zona CDMX/Área Metropolitana, Total y Anticipo del 50%. 4) Indica que puede descargar su cotización en PDF.',
+            instructions: 'Eres el asesor comercial de Mesas de Dulces Sandra. Usa el catálogo Excel para precios/códigos y el Manual Operativo (.md) para reglas de negocio: 1) Si el cliente aún no ha dicho su nombre, pregúntaselo antes de cerrar la cotización final. 2) Si el subtotal supera $4,500 MXN, aplica 10% de descuento. 3) Desglosa subtotal, descuento, envío, Total y Anticipo 50%. 4) Cuando el cliente confirme su cotización, se guardará en tabla y se generará su PDF.',
           },
+        },
+      },
+      {
+        id: 'register',
+        type: 'register',
+        position: { x: 520, y: 80 },
+        data: {
+          label: 'Guardar Cotización',
+          config: { collection: 'cotizaciones', fields: 'cliente, paquetes, total, anticipo' },
         },
       },
       {
         id: 'export',
         type: 'export',
-        position: { x: 520, y: 80 },
+        position: { x: 740, y: 80 },
         data: {
           label: 'Exportar cotización (PDF)',
-          config: { format: 'pdf', filename: 'cotizacion-sandra', title: 'Cotización — Mesas de Dulces Sandra' },
+          config: { format: 'pdf', filename: 'cotizacion-sandra', title: 'Cotización — Mesas de Dulces Sandra', trigger_mode: 'auto' },
         },
       },
-      { id: 'reply', type: 'reply', position: { x: 740, y: 80 }, data: { label: 'Enviar cotización', config: { template: '' } } },
+      { id: 'reply', type: 'reply', position: { x: 960, y: 80 }, data: { label: 'Enviar cotización', config: { template: '' } } },
     ],
     edges: [
       { id: 'message-agent', source: 'message', target: 'agent' },
       { id: 'knowledge-agent', source: 'knowledge', target: 'agent' },
-      { id: 'agent-export', source: 'agent', target: 'export' },
+      { id: 'agent-register', source: 'agent', target: 'register' },
+      { id: 'register-export', source: 'register', target: 'export' },
       { id: 'export-reply', source: 'export', target: 'reply' },
     ],
   };
@@ -193,21 +205,25 @@ function createSampleWorkflows(): SavedWorkflow[] {
         },
       },
       { id: 'register', type: 'register', position: { x: 520, y: 80 }, data: { label: 'Bitácora de Obra', config: { collection: 'expenses' } } },
+      { id: 'query', type: 'query', position: { x: 740, y: 80 }, data: { label: 'Consultar acumulados', config: { collection: 'expenses', period: 'all', category: '' } } },
+      { id: 'report', type: 'report', position: { x: 960, y: 80 }, data: { label: 'Corte de Obra', config: { amount_field: 'amount', group_by: 'category', title: 'Corte de Obra y Gastos (Julio)' } } },
       {
         id: 'export',
         type: 'export',
-        position: { x: 740, y: 80 },
+        position: { x: 1180, y: 80 },
         data: {
-          label: 'Exportar comprobante (Excel)',
-          config: { format: 'xlsx', filename: 'gasto-obra-julio', title: 'Comprobante de Gasto de Obra' },
+          label: 'Exportar corte (Excel)',
+          config: { format: 'xlsx', filename: 'corte-obra-julio', title: 'Corte de Obra y Gastos', trigger_mode: 'on_cut' },
         },
       },
-      { id: 'reply', type: 'reply', position: { x: 960, y: 80 }, data: { label: 'Confirmar registro', config: { template: '✅ Gasto de obra guardado:\n• Concepto: {concept}\n• Categoría: {category}\n• Importe: ${amount} MXN\n• Fecha: {date}' } } },
+      { id: 'reply', type: 'reply', position: { x: 1400, y: 80 }, data: { label: 'Confirmar / Reportar', config: { template: '' } } },
     ],
     edges: [
       { id: 'message-agent', source: 'message', target: 'agent' },
       { id: 'agent-register', source: 'agent', target: 'register' },
-      { id: 'register-export', source: 'register', target: 'export' },
+      { id: 'register-query', source: 'register', target: 'query' },
+      { id: 'query-report', source: 'query', target: 'report' },
+      { id: 'report-export', source: 'report', target: 'export' },
       { id: 'export-reply', source: 'export', target: 'reply' },
     ],
   };
@@ -561,6 +577,14 @@ export function createDemo() {
       return { Fecha: r.date, Concepto: r.concept, Categoría: r.category, Importe: r.amount };
     };
 
+    const hasRegister = order.some((n) => n.type === 'register');
+    const regNode = order.find((n) => n.type === 'register');
+    const regCol = String(regNode?.data.config?.collection ?? 'expenses').trim() || 'expenses';
+    const cutMode = hasRegister && !confirm && isCutRequest(message);
+    let skipRegisterFlow = false;
+    let agentReplyText = '';
+    let didCommitSingle = false;
+
     try {
       for (let i = 0; i < order.length; i++) {
         const node = order[i];
@@ -617,7 +641,9 @@ export function createDemo() {
             addStep(kn, { sources: countForNode });
           }
 
-          if (mode === 'answer') {
+          if (cutMode) {
+            output = extractFilters(message);
+          } else if (mode === 'answer') {
             if (Array.isArray(previous)) {
               const recs = previous as ExpenseRecord[];
               const rowsText = recs.map(formatRecordSummaryLine).join('\n');
@@ -650,6 +676,20 @@ export function createDemo() {
               result.used_llm = false;
               result.sources = citations;
             }
+            agentReplyText = String(output);
+            const nextNode = order[i + 1];
+            if (nextNode?.type === 'register') {
+              const regCfg = nextNode.data.config ?? {};
+              const fieldNames = parseFieldsSpec(regCfg.fields ?? ['cliente', 'paquetes', 'total', 'anticipo']);
+              if (!confirm) {
+                const quoteRec = extractQuoteFromConversation(message, history, agentReplyText, fieldNames);
+                if (!quoteRec) {
+                  skipRegisterFlow = true;
+                } else {
+                  output = quoteRec;
+                }
+              }
+            }
           } else if (mode === 'extract') {
             const nextNode = order[i + 1];
             const regCfg = nextNode?.type === 'register' ? (nextNode.data.config ?? {}) : {};
@@ -680,8 +720,24 @@ export function createDemo() {
             throw new Error('Elige un modo válido para el agente de IA.');
           }
         } else if (node.type === 'register') {
-          if (i === 0 || order[i - 1].type !== 'agent' || order[i - 1].data.config?.mode !== 'extract') {
-            throw new Error('El registro requiere un agente de extracción inmediatamente antes.');
+          if (cutMode) {
+            addStep(node, 'Omitido (generando corte acumulado)', 'skipped');
+            if (!order.slice(i + 1).some((n) => n.type === 'query')) {
+              const queried = queryExpenseRecords(records, { collection: regCol, period: 'all', category: '' }, previous);
+              lastRows = queried;
+              const rep = buildExpenseReport(queried, { title: `Corte de ${regCol}`, amount_field: 'amount', group_by: 'category' });
+              result.report = rep;
+              previous = rep;
+            }
+            continue;
+          }
+          if (skipRegisterFlow) {
+            addStep(node, 'Omitido (conversación sin pedido confirmado)', 'skipped');
+            continue;
+          }
+          const prevMode = order[i - 1]?.data.config?.mode;
+          if (i === 0 || order[i - 1].type !== 'agent' || (prevMode !== 'extract' && prevMode !== 'answer')) {
+            throw new Error('El registro requiere un agente de extracción o respuesta inmediatamente antes.');
           }
           const targetCol = String(cfg.collection ?? 'expenses').trim() || 'expenses';
           const saved = pendingConfirmations.get(run_id);
@@ -699,16 +755,26 @@ export function createDemo() {
           result.preview = preview;
           output = preview;
           if (!confirm) {
+            if (agentReplyText) result.reply = agentReplyText;
             result.status = 'awaiting_confirmation';
             addStep(node, preview, 'awaiting_confirmation');
             return result;
           }
           pendingToCommit = { preview, collection: saved?.collection || targetCol };
+          didCommitSingle = true;
         } else if (node.type === 'query') {
+          if (didCommitSingle && !cutMode && order.slice(i + 1).some((n) => n.type === 'report')) {
+            addStep(node, 'Omitido (registro individual guardado)', 'skipped');
+            continue;
+          }
           const queried = queryExpenseRecords(records, cfg, previous);
           output = queried;
           lastRows = queried;
         } else if (node.type === 'report') {
+          if (didCommitSingle && !cutMode) {
+            addStep(node, 'Omitido (registro individual guardado)', 'skipped');
+            continue;
+          }
           if (i === 0 || order[i - 1].type !== 'query') {
             throw new Error('El informe requiere una consulta inmediatamente antes.');
           }
@@ -716,6 +782,16 @@ export function createDemo() {
           output = report;
           result.report = report;
         } else if (node.type === 'export') {
+          const trig = String(cfg.trigger_mode ?? 'auto');
+          const hasReportNode = order.some((n) => n.type === 'report');
+          if (skipRegisterFlow) {
+            addStep(node, 'Omitido (esperando confirmación de cotización/registro)', 'skipped');
+            continue;
+          }
+          if (didCommitSingle && !cutMode && (trig === 'on_cut' || (trig === 'auto' && hasReportNode))) {
+            addStep(node, 'Omitido (se exporta al pedir el corte)', 'skipped');
+            continue;
+          }
           const fmt = String(cfg.format ?? 'xlsx') === 'pdf' ? 'pdf' : 'xlsx';
           const fname = String(cfg.filename ?? 'reporte-nodaly').trim() || 'reporte-nodaly';
           let expRows: Record<string, string | number>[];
@@ -750,7 +826,7 @@ export function createDemo() {
           continue;
         } else if (node.type === 'reply') {
           const template = String(cfg.template ?? '');
-          if (template) {
+          if (template && !cutMode) {
             const values =
               previous && typeof previous === 'object' && !Array.isArray(previous)
                 ? (previous as Record<string, unknown>)
